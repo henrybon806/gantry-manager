@@ -34,7 +34,6 @@ DEFAULT_STATIONS = [
 def default_presets() -> dict[str, Any]:
     return {
         "bed": list(DEFAULT_BED),
-        "gantry_source": "simulator",
         "gantry_address": f"{DEFAULT_HOST}:8100",
         "scheduler_address": f"{DEFAULT_HOST}:8200",
         "gantry_home": [0.0, 0.0],
@@ -65,9 +64,6 @@ def validate_presets(data: Any) -> dict[str, Any]:
     bed = _pair(data.get("bed", defaults["bed"]), "bed")
     if bed[0] <= 0 or bed[1] <= 0:
         raise ValueError("bed size must be positive")
-    source = data.get("gantry_source", "simulator")
-    if source not in ("simulator", "lab"):
-        raise ValueError("gantry_source must be simulator or lab")
     address = data.get("gantry_address", defaults["gantry_address"])
     if not isinstance(address, str):
         raise ValueError("gantry_address must be text")
@@ -114,7 +110,6 @@ def validate_presets(data: Any) -> dict[str, Any]:
         raise ValueError(f"{len(routes)} sample routes but the shelf has {int(slots)} slots")
     return {
         "bed": bed,
-        "gantry_source": source,
         "gantry_address": address.strip(),
         "scheduler_address": scheduler_address.strip(),
         "gantry_home": home,
@@ -159,13 +154,10 @@ def station_bed_to_raw(presets: dict[str, Any], point: list[float]) -> tuple[flo
 
 
 def poll_targets(layout: dict[str, Any]) -> tuple[dict[str, str], Optional[str], str]:
-    """What python -m web's NodePoller reads: stations, and the scheduler's /state
-    (Simulator) or the gantry node's /position (Lab)."""
+    """What python -m web's NodePoller reads: stations, and the gantry node's /position."""
     stations = {
         station["name"]: station["address"]
         for station in layout["stations"]
         if station["name"] != "shelf" and station["address"]
     }
-    if layout["gantry_source"] == "simulator":
-        return stations, layout["scheduler_address"] or None, "/state"
     return stations, layout["gantry_address"] or None, "/position"

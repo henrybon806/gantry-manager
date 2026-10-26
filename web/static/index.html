@@ -26,13 +26,11 @@
     --head: #a5d6a7;
   }
   * { box-sizing: border-box; }
-  html, body { margin: 0; height: 100%; }
+  html, body { margin: 0; }
   body {
     background: var(--paper);
     color: var(--text);
     font: 13px/1.4 -apple-system, "Helvetica Neue", Helvetica, Arial, sans-serif;
-    display: flex;
-    flex-direction: column;
   }
   header {
     background: var(--ink);
@@ -42,38 +40,32 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    flex: none;
   }
   header h1 { margin: 0; font-size: 20px; letter-spacing: 0.04em; }
   header .live { font: 12px Menlo, monospace; color: var(--head); }
-  main {
-    flex: 1;
-    min-height: 0;
-    display: flex;
-    gap: 16px;
-    padding: 14px 18px;
-  }
+  main { padding: 14px 18px 24px; }
+  /* The bed spans the page width; draw() sets the height to match the bed's shape. */
   #bed-wrap {
-    flex: 1;
-    min-width: 0;
     background: var(--card);
     border: 1px solid var(--line);
     position: relative;
+    height: 420px;
   }
   #bed { position: absolute; inset: 0; width: 100%; height: 100%; user-select: none; touch-action: none; }
   /* Shapes are redrawn every poll; hit-testing is done in script against the svg itself. */
   #bed * { pointer-events: none; }
-  aside {
-    width: 340px;
-    flex: none;
-    overflow-y: auto;
+  #settings {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+    gap: 14px;
+    margin-top: 14px;
+    align-items: start;
   }
-  section { margin-bottom: 14px; }
+  section { background: var(--card); border: 1px solid var(--line); padding: 10px 12px; }
   h2 { margin: 0 0 2px; font-size: 12px; letter-spacing: 0.05em; color: var(--heading); }
   .hint { margin: 0 0 6px; font-size: 11px; color: var(--muted); }
   .row { display: flex; align-items: center; gap: 6px; margin: 3px 0; flex-wrap: wrap; }
   .row .grow { flex: 1; min-width: 0; }
-  label.radio { display: inline-flex; align-items: center; gap: 3px; cursor: pointer; }
   input[type=text] {
     font: 12px Menlo, monospace;
     color: var(--text);
@@ -84,19 +76,6 @@
     min-width: 0;
   }
   input.num { width: 64px; }
-  textarea {
-    width: 100%;
-    font: 12px Menlo, monospace;
-    color: var(--text);
-    background: var(--card);
-    border: 1px solid var(--line);
-    border-radius: 3px;
-    padding: 4px 5px;
-    resize: vertical;
-  }
-  button.primary { background: var(--ink); color: var(--paper); border-color: var(--ink); }
-  button.primary:hover:not(:disabled) { background: #37474f; }
-  #presets-bar { background: var(--card); border: 1px solid var(--line); padding: 8px 10px; }
   input.addr { width: 130px; }
   button {
     font: inherit;
@@ -108,24 +87,37 @@
     cursor: pointer;
   }
   button:hover:not(:disabled) { background: #fff; border-color: var(--ink); }
-  button.wide { white-space: nowrap; min-width: 112px; }
   button:disabled { opacity: 0.5; cursor: default; }
+  button.primary { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+  button.primary:hover:not(:disabled) { background: #37474f; }
   .mono { font: 12px Menlo, monospace; }
   .small { font-size: 11px; }
   .bad { color: var(--bad); }
   .good { color: var(--ok); }
   .warn { color: var(--done); }
-  #readout { color: var(--ink); min-height: 1.4em; }
-  #stations { width: 100%; border-collapse: collapse; background: var(--card); }
+  #position-bar {
+    display: flex;
+    align-items: baseline;
+    gap: 24px;
+    flex-wrap: wrap;
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-top: 0;
+    padding: 8px 14px;
+  }
+  #position-bar .axis { font: bold 20px Menlo, monospace; color: var(--ink); }
+  #position-bar .axis span { font-size: 12px; color: var(--muted); margin-right: 6px; }
+  #position-bar .unit { font: 12px Menlo, monospace; color: var(--muted); }
+  #position-bar.down .axis { color: var(--faint); }
+  #readout { flex: 1; min-width: 200px; text-align: right; }
+  #stations { width: 100%; border-collapse: collapse; }
   #stations th { text-align: left; font-size: 10px; color: var(--muted); padding: 3px 3px 1px; }
   #stations td { padding: 2px 3px; }
   #stations td.name { font: bold 12px Menlo, monospace; color: var(--text); white-space: nowrap; }
-  #stations input.num { width: 48px; }
+  #stations input.num { width: 56px; }
   .remove { color: var(--bad); cursor: pointer; border: 0; background: none; padding: 0 4px; font-size: 14px; }
   @media (max-width: 760px) {
-    main { flex-direction: column; padding: 12px 16px; }
-    #bed-wrap { min-height: 360px; }
-    aside { width: 100%; overflow: visible; }
+    main { padding: 12px 16px; }
   }
 </style>
 </head>
@@ -136,25 +128,31 @@
 </header>
 <main>
   <div id="bed-wrap"><svg id="bed" xmlns="http://www.w3.org/2000/svg"></svg></div>
-  <aside>
-    <section id="presets-bar">
+  <div id="position-bar">
+    <div class="axis"><span>X</span><b id="pos-x">--</b></div>
+    <div class="axis"><span>Y</span><b id="pos-y">--</b></div>
+    <div class="axis"><span>Z</span><b id="pos-z">--</b></div>
+    <div class="unit">mm</div>
+    <div id="readout" class="mono small"></div>
+  </div>
+
+  <div id="settings">
+    <section>
       <div class="row">
         <h2 class="grow" style="margin:0">PRESETS</h2>
         <button id="reload-presets" title="Discard unsaved changes and re-read the file">Reload</button>
         <button id="save-presets" class="primary">Save presets</button>
       </div>
       <div id="presets-status" class="mono small"></div>
+      <div id="error" class="bad small"></div>
     </section>
 
     <section>
-      <h2>GANTRY SOURCE</h2>
-      <p class="hint">The address is the gantry node: the scheduler sends it move, pick and place and assumes they worked (leave it empty to only simulate the gantry). Simulator shows the scheduler's full view; Lab shows only the gantry's x, y.</p>
+      <h2>GANTRY</h2>
+      <p class="hint">The gantry node's address: the scheduler sends it move, pick and place. Leave it empty to only simulate the gantry.</p>
       <div class="row">
-        <label class="radio"><input type="radio" name="source" value="simulator"> Simulator</label>
-        <label class="radio"><input type="radio" name="source" value="lab"> Lab (HTTP)</label>
         <input type="text" id="gantry-address" class="grow" spellcheck="false">
       </div>
-      <div id="readout" class="mono"></div>
       <div id="gantry-link" class="mono small"></div>
       <div class="row">
         <span class="small">home</span>
@@ -167,32 +165,13 @@
 
     <section>
       <h2>MOVE GANTRY</h2>
-      <p class="hint">Bed coordinates in mm; the scheduler sends the gantry a move. Double-click the bed to move there. Refused while the gantry is moving.</p>
+      <p class="hint">Position in mm. Double-click the bed to move there. Refused while the gantry is moving.</p>
       <form class="row" id="move-form">
         <span class="mono">x</span><input type="text" id="move-x" class="num" value="1500">
         <span class="mono">y</span><input type="text" id="move-y" class="num" value="500">
         <button type="submit" id="move-button">Move gantry</button>
       </form>
       <div id="move-result" class="mono small"></div>
-    </section>
-
-    <section>
-      <h2>HOMING</h2>
-      <p class="hint">Jog the gantry to a known spot and capture it. HOME sets the offset; REF (a second spot) sets the scale.</p>
-      <div class="row">
-        <button id="set-home" class="wide">Set HOME here</button>
-        <span class="small">bed</span>
-        <input type="text" id="home-x" class="num" value="0">,<input type="text" id="home-y" class="num" value="0">
-      </div>
-      <div class="row">
-        <button id="set-ref" class="wide">Set REF here</button>
-        <span class="small">bed</span>
-        <input type="text" id="ref-x" class="num" value="10">,<input type="text" id="ref-y" class="num" value="10">
-      </div>
-      <div class="row">
-        <span id="calibration" class="mono small grow"></span>
-        <button id="clear-calibration">Clear</button>
-      </div>
     </section>
 
     <section>
@@ -219,16 +198,7 @@
         <button type="submit">Add experiment</button>
       </form>
     </section>
-
-    <section>
-      <h2>SAMPLES</h2>
-      <p class="hint">One route per line, e.g. A,B,C (letters or station names). Read by the gantry when it starts; restart it to run a new batch.</p>
-      <textarea id="routes" rows="4" spellcheck="false"></textarea>
-      <div id="routes-count" class="mono small"></div>
-    </section>
-
-    <div id="error" class="bad small"></div>
-  </aside>
+  </div>
 </main>
 
 <script>
@@ -237,8 +207,8 @@
 const POLL_MS = 150;
 const BED_MARGIN = 44;
 const MONO = 'font-family="Menlo, monospace"';
-const HALF_W = 52;
-const HALF_H = 32;
+const HALF_W = 56;
+const HALF_H = 30;
 const NOT_STARTED = "not started";
 const UNREADABLE = "unreadable";
 const COLORS = {
@@ -252,13 +222,13 @@ const svg = $("bed");
 
 let presets = null;          // as stored by the server
 let statuses = {};
-let gantryRaw = null;       // [x, y] in gantry coordinates
-let gantryState = null;     // /state payload in simulator mode
+let gantryPos = null;       // [x, y] in mm, exactly as the gantry reported it
+let gantryZ = null;         // z in mm, if the gantry reports one
 let gantryProblem = "";
 let streamLive = false;     // main.py's position stream is connected
 let gantryFrame = 0;        // pending animation frame for the gantry layer
 let drag = null;            // {name, dx, dy}
-let hover = null;           // [bx, by]
+let hover = null;           // [x, y] in mm
 let view = { scale: 1, ox: 0, oy: 0, upper: 0, bottom: 0, width: 0 };
 let saveTimer = null;
 let lastPollOk = false;
@@ -284,38 +254,6 @@ function esc(text) {
   return String(text).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 }
 function setError(text) { $("error").textContent = text; }
-
-// --------------------------------------------------------- calibration
-
-const calibration = {
-  get c() { return presets.calibration; },
-  get homed() { return this.c.home_raw !== null; },
-  toBed([x, y]) {
-    const c = this.c;
-    if (!c.home_raw) return [x, y];
-    return [c.home_bed[0] + (x - c.home_raw[0]) * c.scale[0], c.home_bed[1] + (y - c.home_raw[1]) * c.scale[1]];
-  },
-  toRaw([x, y]) {
-    const c = this.c;
-    if (!c.home_raw) return [x, y];
-    return [c.home_raw[0] + (x - c.home_bed[0]) / c.scale[0], c.home_raw[1] + (y - c.home_bed[1]) / c.scale[1]];
-  },
-  setHome(raw, bed) { this.c.home_raw = raw; this.c.home_bed = bed; },
-  setReference(raw, bed) {
-    const c = this.c;
-    if (!c.home_raw) throw new Error("Set HOME before the reference point.");
-    const scale = [0, 1].map((axis) => {
-      const rawSpan = raw[axis] - c.home_raw[axis];
-      const bedSpan = bed[axis] - c.home_bed[axis];
-      if (rawSpan === 0 || bedSpan === 0) {
-        throw new Error(`REF must differ from HOME on the ${"XY"[axis]} axis (both raw and bed).`);
-      }
-      return bedSpan / rawSpan;
-    });
-    c.scale = scale;
-  },
-  clear() { presets.calibration = { home_raw: null, home_bed: [0, 0], scale: [1, 1] }; },
-};
 
 // -------------------------------------------------------------- presets
 
@@ -399,9 +337,6 @@ $("reload-presets").addEventListener("click", (event) => presetsAction("reload",
 function station(name) { return presets.stations.find((s) => s.name === name); }
 
 function fillForm() {
-  document.querySelectorAll("input[name=source]").forEach((radio) => {
-    radio.checked = radio.value === presets.gantry_source;
-  });
   $("gantry-address").value = presets.gantry_address;
   $("bed-w").value = fmt(presets.bed[0]);
   $("bed-h").value = fmt(presets.bed[1]);
@@ -409,8 +344,6 @@ function fillForm() {
   $("home-pos-y").value = fmt(presets.gantry_home[1]);
   $("move-time").value = fmt(presets.move_time);
   $("shelf-slots").value = presets.shelf_slots;
-  $("routes").value = presets.routes.join("\n");
-  showRouteCount();
   renderStationRows();
   suggestName();
 }
@@ -461,11 +394,7 @@ async function poll() {
   } catch {
     lastPollOk = false;
     statuses = {};
-    gantryRaw = null;
-    gantryState = null;
-    gantryProblem = "GUI SERVER DOWN";
-    $("readout").textContent = "GUI server not running (python main.py)";
-    $("readout").className = "mono bad";
+    setGantry(null, "GUI SERVER DOWN", "GUI server not running (python main.py)", null, false, null);
   }
   $("live").textContent = lastPollOk ? "LIVE" : "GUI SERVER DOWN";
   $("live").style.color = lastPollOk ? "" : "#ef9a9a";
@@ -489,59 +418,34 @@ function showGantryLink(link) {
 
 function applySnapshot(snap) {
   statuses = snap.statuses || {};
-  const simulator = presets.gantry_source === "simulator";
-  let { payload, problem, detail } = snap.gantry;
-  // The dot is drawn only where the scheduler says the gantry is; nothing is guessed here.
-  let raw = null, state = null, source = null;
-  if (!problem && payload !== null && payload !== undefined) {
-    try {
-      if (simulator) {
-        if (typeof payload !== "object" || !("position" in payload) || !("now" in payload)) throw new Error();
-        state = payload;
-        source = state.coordinates_source;
-        if (state.coordinates) {
-          raw = [Number(state.coordinates[0]), Number(state.coordinates[1])];
-          if (!raw.every(Number.isFinite)) throw new Error();
-        } else {
-          problem = state.coordinates_problem || UNREADABLE;
-          detail = state.coordinates_detail || "no gantry position";
-        }
-      } else {
-        raw = [Number(payload.x), Number(payload.y)];
-        if (!raw.every(Number.isFinite)) throw new Error();
-        source = payload.source;
-      }
-    } catch {
-      raw = null; state = null; problem = UNREADABLE; detail = "unexpected response";
-    }
-  }
-  gantryState = state;
   // Under main.py the stream is newer than this poll, so it owns the position.
-  if (!streamLive) setGantry(raw, problem, detail, source, payload == null);
-
-  const cal = $("calibration");
-  if (calibration.homed) {
-    const [sx, sy] = presets.calibration.scale;
-    cal.textContent = `HOMED  scale ${Number(sx.toPrecision(4))}, ${Number(sy.toPrecision(4))}`;
-    cal.className = "mono small grow good";
-  } else {
-    cal.textContent = "NOT HOMED  showing raw coordinates";
-    cal.className = "mono small grow warn";
+  if (streamLive) return;
+  let { payload, problem, detail } = snap.gantry;
+  let pos = null;
+  if (!problem && payload !== null && payload !== undefined) {
+    pos = [Number(payload.x), Number(payload.y)];
+    if (!pos.every(Number.isFinite)) { pos = null; problem = UNREADABLE; detail = "unexpected response"; }
   }
+  const z = payload && typeof payload.z === "number" ? payload.z : null;
+  setGantry(pos, problem, detail, payload && payload.source, payload == null, z);
 }
 
-function setGantry(raw, problem, detail, source, noAddress) {
-  gantryRaw = raw;
+// The dot is drawn only where the gantry says it is; nothing is guessed here.
+function setGantry(pos, problem, detail, source, noAddress, z) {
+  gantryPos = pos;
+  gantryZ = pos === null ? null : z;
   gantryProblem = problem ? problemLabel(problem) : (noAddress ? "NO ADDRESS" : "OFF LAYOUT");
+  $("pos-x").textContent = pos ? pos[0].toFixed(1) : "--";
+  $("pos-y").textContent = pos ? pos[1].toFixed(1) : "--";
+  $("pos-z").textContent = gantryZ === null ? "--" : gantryZ.toFixed(1);
+  $("position-bar").classList.toggle("down", pos === null);
   const readout = $("readout");
-  if (raw === null) {
-    readout.textContent = (problem ? `${problemLabel(problem)}  ${detail}` : detail || "NO GANTRY ADDRESS").slice(0, 80);
-    readout.className = "mono bad";
+  if (pos === null) {
+    readout.textContent = (problem ? `${problemLabel(problem)}  ${detail}` : detail || "NO GANTRY ADDRESS").slice(0, 90);
+    readout.className = "mono small bad";
   } else {
-    const bed = calibration.toBed(raw);
-    const label = source === "simulated" ? "  SIMULATED" : "";
-    readout.textContent = `RAW ${raw[0].toFixed(1)}, ${raw[1].toFixed(1)}  →  BED ${bed[0].toFixed(1)}, ${bed[1].toFixed(1)}${label}`;
-    readout.className = "mono";
+    readout.textContent = source === "simulated" ? "SIMULATED" : "";
+    readout.className = "mono small warn";
   }
 }
 
@@ -553,9 +457,10 @@ function startGantryStream() {
   const stream = new EventSource("/api/gantry/stream");
   stream.onmessage = (event) => {
     const reading = JSON.parse(event.data);
-    const raw = reading.x === null || reading.y === null ? null : [Number(reading.x), Number(reading.y)];
+    const pos = reading.x === null || reading.y === null ? null : [Number(reading.x), Number(reading.y)];
     streamLive = true;
-    setGantry(raw, raw ? "" : reading.problem || UNREADABLE, reading.detail || "", reading.source, false);
+    const z = typeof reading.z === "number" ? reading.z : null;
+    setGantry(pos, pos ? "" : reading.problem || UNREADABLE, reading.detail || "", reading.source, false, z);
     if (!gantryFrame) gantryFrame = requestAnimationFrame(() => { gantryFrame = 0; drawGantryLayer(); });
   };
   // EventSource reconnects by itself (e.g. after restarting main.py); until then, polling shows the gantry.
@@ -564,7 +469,7 @@ function startGantryStream() {
 
 function drawGantryLayer() {
   const layer = document.getElementById("gantry-layer");
-  if (layer) layer.innerHTML = drawGantry(view.upper, view.bottom, view.width, MONO);
+  if (layer) layer.innerHTML = drawGantry(view.upper, view.bottom, view.width);
 }
 
 // ------------------------------------------------------------- drawing
@@ -587,57 +492,49 @@ function text(x, y, content, attrs = "") {
 
 function draw() {
   if (!presets) return;
-  const box = svg.getBoundingClientRect();
-  const width = Math.max(box.width, 200), height = Math.max(box.height, 200);
+  const wrap = $("bed-wrap");
+  const width = Math.max(wrap.clientWidth, 200);
   const [bedW, bedH] = bedSize();
   // On narrow screens the legend goes under the title, so the bed starts lower.
   const narrow = width < 620;
   const top = BED_MARGIN + (narrow ? 26 : 10);
-  view.scale = Math.min((width - 2 * BED_MARGIN) / bedW, (height - top - BED_MARGIN) / bedH);
+  // The bed fills the width; the box is as tall as the bed's shape needs.
+  view.scale = (width - 2 * BED_MARGIN) / bedW;
+  const height = Math.round(top + bedH * view.scale + BED_MARGIN + 6);
+  if (wrap.clientHeight !== height) wrap.style.height = `${height}px`;
   view.ox = BED_MARGIN;
   view.oy = top + bedH * view.scale;
   const [left, bottom] = toCanvas(0, 0);
   const [right, upper] = toCanvas(bedW, bedH);
   const parts = [];
-  const mono = 'font-family="Menlo, monospace"';
 
   parts.push(text(20, 24, "GANTRY BED  /  LIVE POSITION", 'font-size="12" font-weight="bold" fill="var(--heading)"'));
   parts.push(text(narrow ? 20 : width - 20, narrow ? 40 : 24, "TEAL IDLE   RED BUSY   AMBER DONE   GREY NOT STARTED",
-    `text-anchor="${narrow ? "start" : "end"}" font-size="${narrow ? 9 : 10}" font-weight="bold" fill="var(--muted)" ${mono}`));
+    `text-anchor="${narrow ? "start" : "end"}" font-size="${narrow ? 9 : 10}" font-weight="bold" fill="var(--muted)" ${MONO}`));
   parts.push(`<rect x="${left}" y="${upper}" width="${right - left}" height="${bottom - upper}" fill="var(--bed)" stroke="var(--line)" stroke-width="2"/>`);
 
   const step = gridStep(Math.max(bedW, bedH));
   for (let v = 0; v <= bedW + 1e-9; v += step) {
     const [x] = toCanvas(v, 0);
     parts.push(`<line x1="${x}" y1="${upper}" x2="${x}" y2="${bottom}" stroke="var(--grid)"/>`);
-    parts.push(text(x, bottom + 14, fmt(v), `text-anchor="middle" font-size="9" fill="var(--faint)" ${mono}`));
+    parts.push(text(x, bottom + 14, fmt(v), `text-anchor="middle" font-size="9" fill="var(--faint)" ${MONO}`));
   }
   for (let v = 0; v <= bedH + 1e-9; v += step) {
     const [, y] = toCanvas(0, v);
     parts.push(`<line x1="${left}" y1="${y}" x2="${right}" y2="${y}" stroke="var(--grid)"/>`);
-    parts.push(text(left - 8, y + 3, fmt(v), `text-anchor="end" font-size="9" fill="var(--faint)" ${mono}`));
-  }
-
-  if (calibration.homed) {
-    const [hx, hy] = toCanvas(...presets.calibration.home_bed);
-    parts.push(`<path d="M${hx - 7} ${hy}H${hx + 7}M${hx} ${hy - 7}V${hy + 7}" stroke="var(--ok)" stroke-width="2"/>`);
-    parts.push(text(hx + 9, hy + 12, "HOME", `font-size="9" font-weight="bold" fill="var(--ok)" ${mono}`));
+    parts.push(text(left - 8, y + 3, fmt(v), `text-anchor="end" font-size="9" fill="var(--faint)" ${MONO}`));
   }
 
   const [gx, gy] = toCanvas(...presets.gantry_home);
   parts.push(`<rect x="${gx - 5}" y="${gy - 5}" width="10" height="10" fill="none" stroke="var(--ink)" stroke-width="1.5" stroke-dasharray="2 2"/>`);
-  parts.push(text(gx + 8, gy - 6, "GANTRY HOME", `font-size="8" font-weight="bold" fill="var(--muted)" ${mono}`));
+  parts.push(text(gx + 8, gy - 6, "GANTRY HOME", `font-size="8" font-weight="bold" fill="var(--muted)" ${MONO}`));
 
-  for (const s of presets.stations) parts.push(drawStation(s, mono));
+  for (const s of presets.stations) parts.push(drawStation(s));
   parts.push('<g id="gantry-layer"></g>');
 
   if (hover) {
-    let content = `CURSOR  bed ${hover[0].toFixed(1)}, ${hover[1].toFixed(1)}`;
-    if (calibration.homed) {
-      const [rx, ry] = calibration.toRaw(hover);
-      content += `   raw ${rx.toFixed(1)}, ${ry.toFixed(1)}`;
-    }
-    parts.push(text(20, height - 12, content, `font-size="10" fill="var(--muted)" ${mono}`));
+    parts.push(text(20, height - 10, `CURSOR  X ${hover[0].toFixed(1)}  Y ${hover[1].toFixed(1)} mm`,
+      `font-size="10" fill="var(--muted)" ${MONO}`));
   }
   svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
   svg.innerHTML = parts.join("");
@@ -645,46 +542,37 @@ function draw() {
   drawGantryLayer();
 }
 
-function drawStation(s, mono) {
+function drawStation(s) {
   const [x, y] = toCanvas(s.x, s.y);
   let state, color, detail = "";
   if (s.name === "shelf") {
     color = COLORS.shelf;
-    const samples = gantryState && Array.isArray(gantryState.substrates) ? gantryState.substrates : null;
-    const slots = (gantryState && gantryState.shelf_slots) || presets.shelf_slots;
-    state = samples ? `${samples.filter((x) => x.location === "shelf").length}/${slots}` : `${slots}`;
+    state = `${presets.shelf_slots}`;
     detail = "slots";
   } else if (!s.address) {
     state = "NO PORT"; color = "var(--faint)";
   } else {
     const status = statuses[s.name] || { state: NOT_STARTED };
     color = COLORS[status.state] || "var(--faint)";
-    detail = status.sample_id || "";
-    if (status.state === "busy" && typeof status.remaining === "number") detail = `${detail} ${status.remaining.toFixed(1)}s`;
+    if (status.state === "busy" && typeof status.remaining === "number") detail = `${status.remaining.toFixed(1)}s`;
     state = problemLabel(status.state);
   }
   const strokeWidth = drag && drag.name === s.name ? 3 : 2;
   const port = s.address ? `:${addressPort(s.address)}` : "";
-  const out = [
+  return [
     `<rect x="${x - HALF_W}" y="${y - HALF_H}" width="${2 * HALF_W}" height="${2 * HALF_H}" rx="2" fill="var(--card)" stroke="${color}" stroke-width="${strokeWidth}"/>`,
-    text(x, y - 16, stationLabel(s.name), 'text-anchor="middle" font-size="11" font-weight="bold" fill="var(--ink)"'),
-    text(x, y - 2, `${state} ${detail}`.trim(), `text-anchor="middle" font-size="10" font-weight="bold" fill="${color}" ${mono}`),
-    text(x, y + 11, `(${fmt(s.x)}, ${fmt(s.y)}) ${port}`.trim(), `text-anchor="middle" font-size="9" fill="var(--muted)" ${mono}`),
-  ];
-  if (calibration.homed) {
-    const [rx, ry] = calibration.toRaw([s.x, s.y]);
-    out.push(text(x, y + 24, `go raw ${rx.toFixed(1)}, ${ry.toFixed(1)}`, `text-anchor="middle" font-size="9" fill="var(--ok)" ${mono}`));
-  }
-  return out.join("");
+    text(x, y - 13, stationLabel(s.name), 'text-anchor="middle" font-size="11" font-weight="bold" fill="var(--ink)"'),
+    text(x, y + 2, `${state} ${detail}`.trim(), `text-anchor="middle" font-size="10" font-weight="bold" fill="${color}" ${MONO}`),
+    text(x, y + 17, `(${fmt(s.x)}, ${fmt(s.y)}) ${port}`.trim(), `text-anchor="middle" font-size="9" fill="var(--muted)" ${MONO}`),
+  ].join("");
 }
 
-function drawGantry(upper, bottom, width, mono) {
-  if (gantryRaw === null) {
-    return text(width / 2, upper - 14, `GANTRY ${gantryProblem}`, `text-anchor="middle" font-size="11" font-weight="bold" fill="var(--bad)" ${mono}`);
+function drawGantry(upper, bottom, width) {
+  if (gantryPos === null) {
+    return text(width / 2, upper - 14, `GANTRY ${gantryProblem}`, `text-anchor="middle" font-size="11" font-weight="bold" fill="var(--bad)" ${MONO}`);
   }
-  const bed = calibration.toBed(gantryRaw);
   const [bedW, bedH] = bedSize();
-  const clamped = [Math.min(Math.max(bed[0], 0), bedW), Math.min(Math.max(bed[1], 0), bedH)];
+  const clamped = [Math.min(Math.max(gantryPos[0], 0), bedW), Math.min(Math.max(gantryPos[1], 0), bedH)];
   const [x, y] = toCanvas(...clamped);
   const out = [
     `<line x1="${x}" y1="${upper}" x2="${x}" y2="${bottom}" stroke="var(--ink)" stroke-width="4"/>`,
@@ -693,16 +581,11 @@ function drawGantry(upper, bottom, width, mono) {
     `<rect x="${x - 13}" y="${y - 13}" width="26" height="26" fill="var(--ink)" stroke="var(--head)" stroke-width="2"/>`,
     `<path d="M${x - 5} ${y}H${x + 5}M${x} ${y - 5}V${y + 5}" stroke="var(--head)" stroke-width="2"/>`,
   ];
-  let label = `GANTRY ${bed[0].toFixed(1)}, ${bed[1].toFixed(1)}`;
-  if (clamped[0] !== bed[0] || clamped[1] !== bed[1]) label += "  (OFF BED)";
+  let label = `GANTRY ${gantryPos[0].toFixed(1)}, ${gantryPos[1].toFixed(1)}`;
+  if (clamped[0] !== gantryPos[0] || clamped[1] !== gantryPos[1]) label += "  (OFF BED)";
   const rightSide = x < width - 200;
-  const anchor = rightSide ? "start" : "end";
-  const offset = rightSide ? 20 : -20;
-  out.push(text(x + offset, y - 4, label, `text-anchor="${anchor}" font-size="10" font-weight="bold" fill="var(--ink)" ${mono}`));
-  const transport = gantryState && gantryState.transport;
-  if (transport && transport.phase === "delivery") {
-    out.push(text(x + offset, y + 10, transport.substrate_id, `text-anchor="${anchor}" font-size="10" font-weight="bold" fill="var(--done)" ${mono}`));
-  }
+  out.push(text(x + (rightSide ? 20 : -20), y - 4, label,
+    `text-anchor="${rightSide ? "start" : "end"}" font-size="10" font-weight="bold" fill="var(--ink)" ${MONO}`));
   return out.join("");
 }
 
@@ -737,8 +620,8 @@ svg.addEventListener("pointermove", (event) => {
   if (drag) {
     const s = station(drag.name);
     const [bedW, bedH] = bedSize();
-    s.x = Math.round(Math.min(Math.max(hover[0] - drag.dx, 0), bedW) * 10) / 10;
-    s.y = Math.round(Math.min(Math.max(hover[1] - drag.dy, 0), bedH) * 10) / 10;
+    s.x = Math.round(Math.min(Math.max(hover[0] - drag.dx, 0), bedW));
+    s.y = Math.round(Math.min(Math.max(hover[1] - drag.dy, 0), bedH));
     syncRow(s.name);
   }
   draw();
@@ -754,8 +637,8 @@ svg.addEventListener("dblclick", (event) => {
   const [bx, by] = toBed(cx, cy);
   const [bedW, bedH] = bedSize();
   if (bx < 0 || bx > bedW || by < 0 || by > bedH) return;
-  $("move-x").value = bx.toFixed(1);
-  $("move-y").value = by.toFixed(1);
+  $("move-x").value = bx.toFixed(0);
+  $("move-y").value = by.toFixed(0);
   moveGantry();
 });
 window.addEventListener("resize", draw);
@@ -763,17 +646,15 @@ window.addEventListener("resize", draw);
 // ------------------------------------------------------------- moving
 
 async function moveGantry() {
-  const bed = [num($("move-x").value), num($("move-y").value)];
+  const [x, y] = [num($("move-x").value), num($("move-y").value)];
   const result = $("move-result");
-  if (bed.includes(null)) {
+  if (x === null || y === null) {
     result.textContent = "x and y must be numbers";
     result.className = "mono small bad";
     return;
   }
-  // The gantry moves in its own (raw) coordinates; HOME/REF calibration maps bed to raw.
-  const [x, y] = calibration.toRaw(bed);
   $("move-button").disabled = true;
-  result.textContent = `Sending move to bed (${fmt(bed[0])}, ${fmt(bed[1])})...`;
+  result.textContent = `Sending move to (${fmt(x)}, ${fmt(y)})...`;
   result.className = "mono small";
   try {
     const response = await fetch("/api/move", {
@@ -782,7 +663,7 @@ async function moveGantry() {
       body: JSON.stringify({ x, y }),
     });
     const reply = await response.json();
-    result.textContent = reply.ok ? `Moving to bed (${fmt(bed[0])}, ${fmt(bed[1])})` : reply.message;
+    result.textContent = reply.ok ? `Moving to (${fmt(x)}, ${fmt(y)})` : reply.message;
     result.className = `mono small ${reply.ok ? "good" : "bad"}`;
   } catch {
     result.textContent = "GUI server not running";
@@ -793,11 +674,8 @@ async function moveGantry() {
 }
 $("move-form").addEventListener("submit", (event) => { event.preventDefault(); moveGantry(); });
 
-// ------------------------------------------------------ sidebar edits
+// ------------------------------------------------------ settings edits
 
-document.querySelectorAll("input[name=source]").forEach((radio) => {
-  radio.addEventListener("change", () => { presets.gantry_source = radio.value; pushPresets(); });
-});
 $("gantry-address").addEventListener("input", (event) => {
   presets.gantry_address = event.target.value.trim();
   pushPresets();
@@ -808,7 +686,6 @@ for (const [id, axis] of [["bed-w", 0], ["bed-h", 1]]) {
     if (value !== null && value > 0) { presets.bed[axis] = value; pushPresets(); draw(); }
   });
 }
-
 for (const [id, axis] of [["home-pos-x", 0], ["home-pos-y", 1]]) {
   $(id).addEventListener("input", (event) => {
     const value = num(event.target.value);
@@ -822,19 +699,8 @@ $("move-time").addEventListener("input", (event) => {
 $("shelf-slots").addEventListener("input", (event) => {
   const value = num(event.target.value);
   if (value !== null && Number.isInteger(value) && value >= 1 && value <= 30) {
-    presets.shelf_slots = value; pushPresets(); showRouteCount(); draw();
+    presets.shelf_slots = value; pushPresets(); draw();
   }
-});
-function showRouteCount() {
-  const count = presets.routes.length;
-  const over = count > presets.shelf_slots;
-  $("routes-count").textContent = `${count} sample${count === 1 ? "" : "s"} / ${presets.shelf_slots} shelf slots${over ? " (too many)" : ""}`;
-  $("routes-count").className = `mono small ${over ? "bad" : ""}`;
-}
-$("routes").addEventListener("input", (event) => {
-  presets.routes = event.target.value.split("\n").map((line) => line.trim()).filter(Boolean);
-  showRouteCount();
-  if (presets.routes.length <= presets.shelf_slots) pushPresets();
 });
 
 $("stations").addEventListener("input", (event) => {
@@ -866,36 +732,13 @@ $("add-form").addEventListener("submit", (event) => {
   if (!name) return setError("Enter a name for the new experiment.");
   if (station(name)) return setError(`${name} already exists.`);
   const [bedW, bedH] = bedSize();
-  presets.stations.push({ name, address: "", x: Math.round(bedW * 5) / 10, y: Math.round(bedH * 5) / 10 });
+  presets.stations.push({ name, address: "", x: Math.round(bedW / 2), y: Math.round(bedH / 2) });
   setError("");
   renderStationRows();
   suggestName();
   pushPresets();
   draw();
 });
-
-function enteredPoint(xId, yId) {
-  const point = [num($(xId).value), num($(yId).value)];
-  if (point.includes(null)) throw new Error("Bed coordinates must be numbers.");
-  return point;
-}
-$("set-home").addEventListener("click", () => {
-  try {
-    if (!gantryRaw) throw new Error("No live gantry position to home against.");
-    calibration.setHome([...gantryRaw], enteredPoint("home-x", "home-y"));
-    setError("");
-    pushPresets();
-  } catch (error) { setError(error.message); }
-});
-$("set-ref").addEventListener("click", () => {
-  try {
-    if (!gantryRaw) throw new Error("No live gantry position to calibrate against.");
-    calibration.setReference([...gantryRaw], enteredPoint("ref-x", "ref-y"));
-    setError("");
-    pushPresets();
-  } catch (error) { setError(error.message); }
-});
-$("clear-calibration").addEventListener("click", () => { calibration.clear(); setError(""); pushPresets(); });
 
 // --------------------------------------------------------------- start
 

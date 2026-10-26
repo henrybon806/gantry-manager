@@ -54,6 +54,14 @@ class GantryLink:
         except (KeyError, TypeError, ValueError):
             return None, UNREADABLE, "the gantry's /status has no position"
 
+    def z(self) -> Optional[float]:
+        """The gantry's z from its latest /status, if it reports one."""
+        payload, problem, _ = self.listener.latest()
+        try:
+            return None if problem else float(payload["position"]["z"])
+        except (KeyError, TypeError, ValueError):
+            return None
+
     def send(self, command: str, **arguments: Any) -> None:
         """Queue ``move``, ``pick`` or ``place`` (NodeClient method names)."""
         self._queue.put((command, arguments))

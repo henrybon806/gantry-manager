@@ -271,27 +271,19 @@ curl http://127.0.0.1:8080/scheduler/state
 the gantry. The server polls the nodes and the gantry for the page (browsers
 cannot read the nodes directly) and forwards moves to the gantry.
 
-The page is a top-down view of the bed showing the live gantry position and
-each experiment's state. It has no run controls: samples and routes are set on
-the gantry's command line (`--route A,B,C`, one per sample) and durations on
-each node. Restart `main.py` to run a new batch.
+The page shows the bed full width at its real shape (3000 × 1000 mm by
+default), with the live gantry and each experiment's state, and the gantry's
+X, Y and Z right under it. Settings are in cards below. It has no run
+controls: sample routes come from `presets.json` (`"routes"`) or `--route`
+for now, and durations from each node. Restart `main.py` to run a new batch.
 
-- **Gantry source**: *Simulator* shows the scheduler's full state and places
-  the gantry between the stations it is moving between. *Lab (HTTP)* shows only
-  the gantry's x, y. Under `main.py` both come from the scheduler directly; with
-  `python -m web` alone, *Simulator* polls `GET /state` and *Lab* polls
-  `GET /position` at the gantry address.
-- **Move gantry**: type bed x, y and press *Move gantry*, or double-click an
-  empty spot on the bed. It asks the scheduler to move (through the HOME/REF
-  calibration if set) and shows the reply, e.g. *Refused: gantry is busy moving*.
+- **Gantry**: the gantry node's address (empty to only simulate the gantry),
+  the last command's result, its home spot and the move time.
+- **Move gantry**: type x, y in mm and press *Move gantry*, or double-click an
+  empty spot on the bed. The reply shows, e.g. *Refused: gantry is busy moving*.
+- **Bed & shelf**: bed size in mm and the number of shelf slots.
 - **Experiments**: set each node address (`http://host:port`, `host:port` or a
   port), drag boxes to place them, and add or remove experiments.
-- **Homing**: jog the gantry to a known spot and press *Set HOME here*, which
-  sets the offset. Then move to a second spot and press *Set REF here*, which
-  sets the scale. Each box then shows the raw coordinate to drive to.
-- **Bed & shelf**, **Samples**: bed size, number of shelf slots, and one sample
-  route per line. The shelf box shows slots in use (e.g. `2/5`) while the
-  gantry runs.
 - Edits apply straight away (every open tab sees them) but are only written
   to disk when you press **Save presets**. *Reload* throws away unsaved edits.
 
@@ -299,7 +291,7 @@ The server's API, if you want to script it:
 
 ```text
 GET  /api/presets    PUT /api/presets    POST /api/presets/save    POST /api/presets/reload
-GET  /api/snapshot   POST /api/move {"x", "y"}
+GET  /api/snapshot   POST /api/move {"x", "y"}   GET /api/gantry/stream (main.py only)
 ```
 
 The older Tkinter window (`python -m legacy.gantry_gui`) still works but keeps its
@@ -314,7 +306,6 @@ it in the web GUI and press **Save presets**; `main.py` (and
 ```json
 {
   "bed": [3000.0, 1000.0],
-  "gantry_source": "simulator",
   "gantry_address": "127.0.0.1:8100",
   "scheduler_address": "127.0.0.1:8200",
   "gantry_home": [0.0, 0.0],

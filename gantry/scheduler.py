@@ -302,13 +302,19 @@ class GantryManager:
         )
 
     def pos(self) -> dict[str, Any]:
-        """Payload for GET /pos. ``x`` and ``y`` are None when the gantry cannot be read."""
+        """Payload for GET /pos. ``x``, ``y`` and ``z`` are None when the gantry cannot be read."""
         point, source, problem, detail = self.position_reading()
         moving = self.gantry_busy
+        if point is None:
+            z = None
+        elif self.gantry is not None:
+            z = self.gantry.z()
+        else:
+            z = 0.0
         return {
             "x": None if point is None else point[0],
             "y": None if point is None else point[1],
-            "z": 0.0,
+            "z": z,
             "moving": moving,
             "at": None if moving or self.position == MANUAL else self.position,
             "source": source,

@@ -435,7 +435,6 @@ class WebGuiTests(unittest.TestCase):
 
         presets = reply["presets"]
         presets["stations"][1]["x"] = 12.5
-        presets["gantry_source"] = "lab"
         presets["shelf_slots"] = 4
         presets["routes"] = ["A", "B,A"]
         edited = self.client.put("/api/presets", json=presets).json()
@@ -543,7 +542,6 @@ class WebGuiTests(unittest.TestCase):
         manager = build_manager([f"A=127.0.0.1:{free_port()}@30,40"], ["A"], movement_time=0.2)
         scheduler = Scheduler(manager)
         presets = default_presets()
-        presets["gantry_source"] = "simulator"
         self.presets_path.write_text(json.dumps(presets))
         store = web_server.PresetsStore(None, self.presets_path, legacy_path=None, scheduler=scheduler)
         app = web_server.create_app(store)
@@ -557,7 +555,8 @@ class WebGuiTests(unittest.TestCase):
             # Stations the running scheduler does not know are reported, not polled.
             self.assertIn("restart main.py", snap["statuses"]["experiment_b"]["error"])
             self.assertEqual(snap["gantry"]["problem"], "")
-            self.assertIn("substrates", snap["gantry"]["payload"])
+            self.assertEqual(snap["gantry"]["payload"]["source"], "simulated")
+            self.assertEqual(snap["gantry"]["payload"]["z"], 0.0)
             self.assertIn("substrates", client.get("/scheduler/state").json())
 
             self.assertEqual(client.post("/api/move", json={"x": 5, "y": 5}).json(), {"ok": True, "message": "Moving"})
@@ -572,7 +571,7 @@ class WebGuiTests(unittest.TestCase):
         manager = build_manager([f"A=127.0.0.1:{free_port()}@30,40"], ["A"], movement_time=0.2, home="5,6")
         store = web_server.PresetsStore(None, self.presets_path, legacy_path=None, scheduler=Scheduler(manager))
         self.assertEqual(store.gantry_reading(), {
-            "x": 5.0, "y": 6.0, "moving": False, "source": "simulated", "problem": None, "detail": None,
+            "x": 5.0, "y": 6.0, "z": 0.0, "moving": False, "source": "simulated", "problem": None, "detail": None,
         })
 
 

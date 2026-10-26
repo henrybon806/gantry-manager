@@ -3,7 +3,6 @@
     3000.0,
     1000.0
   ],
-  "gantry_source": "lab",
   "gantry_address": "127.0.0.1:8100",
   "gantry_home": [
     0.0,

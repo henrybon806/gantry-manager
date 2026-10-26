@@ -90,8 +90,6 @@ class PresetsStore:
             name = station["name"]
             if name != "shelf" and station["address"] and name not in statuses:
                 statuses[name] = {"state": NOT_STARTED, "error": "not in the running scheduler; restart main.py to add it"}
-        if presets["gantry_source"] == "simulator":
-            return statuses, (self.scheduler.snapshot(), "", "")
         payload = self.scheduler.pos()
         if payload["x"] is None:
             return statuses, (None, payload["problem"], payload["detail"])
@@ -100,7 +98,7 @@ class PresetsStore:
     def gantry_reading(self) -> dict[str, Any]:
         """The gantry's position as the scheduler has it right now (main.py only)."""
         pos = self.scheduler.pos()
-        return {key: pos[key] for key in ("x", "y", "moving", "source", "problem", "detail")}
+        return {key: pos[key] for key in ("x", "y", "z", "moving", "source", "problem", "detail")}
 
     def gantry_link(self) -> Optional[dict[str, Any]]:
         """What happened to the last command sent to the gantry node, under main.py."""
