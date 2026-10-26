@@ -1,3 +1,4 @@
+import json
 import random
 import socket
 import threading
@@ -453,6 +454,36 @@ class WebGuiTests(unittest.TestCase):
             scheduler.stop()
             server.should_exit = True
             thread.join(timeout=5)
+
+    def test_gui_reads_and_moves_the_scheduler_directly(self):
+        from fastapi.testclient import TestClient
+
+        from web import server as web_server
+
+        manager = build_manager([f"A=127.0.0.1:{free_port()}@30,40"], ["A"], movement_time=0.2)
+        scheduler = Scheduler(manager)
+        presets = default_presets()
+        presets["gantry_source"] = "simulator"
+        self.presets_path.write_text(json.dumps(presets))
+        store = web_server.PresetsStore(None, self.presets_path, legacy_path=None, scheduler=scheduler)
+        app = web_server.create_app(store)
+        app.mount("/scheduler", create_app(scheduler))
+        client = TestClient(app)
+        scheduler.start()
+        try:
+            time.sleep(0.3)
+            snap = client.get("/api/snapshot").json()
+            self.assertEqual(snap["statuses"]["experiment_a"]["state"], NOT_STARTED)
+            # Stations the running scheduler does not know are reported, not polled.
+            self.assertIn("restart main.py", snap["statuses"]["experiment_b"]["error"])
+            self.assertEqual(snap["gantry"]["problem"], "")
+            self.assertIn("substrates", snap["gantry"]["payload"])
+            self.assertIn("substrates", client.get("/scheduler/state").json())
+
+            self.assertEqual(client.post("/api/move", json={"x": 5, "y": 5}).json(), {"ok": True, "message": "Moving"})
+            self.assertIn("Refused", client.post("/api/move", json={"x": 1, "y": 1}).json()["message"])
+        finally:
+            scheduler.stop()
 
 
 if __name__ == "__main__":

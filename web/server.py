@@ -3,9 +3,10 @@
     python main.py           # GUI and scheduler together; then open http://127.0.0.1:8080
     python -m web            # GUI only, to watch a gantry running elsewhere
 
-Start the experiments in their own terminals first (or after; the page shows
-NOT STARTED until they answer). This server polls them
-on the page's behalf, because browsers cannot read the nodes directly, and
+Under main.py the page reads everything from the scheduler in the same
+process: node statuses, the gantry and the samples, and moves go straight to
+it. Alone (python -m web), this server polls the nodes and the scheduler over
+HTTP on the page's behalf, because browsers cannot read them directly, and
 forwards gantry moves to POST /pos.
 
     GET  /                     the page (web/static/index.html)
@@ -27,6 +28,7 @@ from typing import Any, Optional
 
 from pydantic import BaseModel
 
+from gantry.scheduler import NOT_STARTED
 from helpers.polling import NodePoller
 from helpers.presets import DATA_DIR, LAYOUT_PATH, PRESETS_PATH, load_presets, poll_targets, save_presets, validate_presets
 from labnode import NodeClient, NodeError, NodeUnreachable
@@ -42,19 +44,54 @@ class MoveRequest(BaseModel):
 
 
 class PresetsStore:
-    """The settings being edited, kept in step with the poller.
+    """The settings being edited, and where the page's live readings come from.
 
     Edits stay in memory (shared by every open tab) until ``save`` writes
     presets.json. ``unsaved`` says whether they differ from the file.
+
+    With ``scheduler`` (main.py), every reading comes from the scheduler in
+    this process. Without it (python -m web), ``poller`` reads the nodes and
+    the scheduler over HTTP.
     """
 
-    def __init__(self, poller: NodePoller, path: Path = PRESETS_PATH, legacy_path: Optional[Path] = LAYOUT_PATH) -> None:
+    def __init__(
+        self,
+        poller: Optional[NodePoller],
+        path: Path = PRESETS_PATH,
+        legacy_path: Optional[Path] = LAYOUT_PATH,
+        scheduler: Optional[Any] = None,
+    ) -> None:
         self.poller = poller
+        self.scheduler = scheduler
         self.path = path
         self._lock = threading.Lock()
         self._presets = load_presets(path, legacy_path)
         self._saved = self._presets if path.exists() else None
-        self.poller.set_targets(*poll_targets(self._presets))
+        self._retarget(self._presets)
+
+    def _retarget(self, presets: dict[str, Any]) -> None:
+        if self.poller is not None:
+            self.poller.set_targets(*poll_targets(presets))
+
+    def readings(self) -> tuple[dict[str, dict[str, Any]], tuple[Any, str, str]]:
+        """``(statuses by station, (gantry payload, problem, detail))`` for the page."""
+        if self.scheduler is None:
+            return self.poller.snapshot()
+        presets = self.get()
+        statuses = self.scheduler.node_statuses()
+        for station in presets["stations"]:
+            name = station["name"]
+            if name != "shelf" and station["address"] and name not in statuses:
+                statuses[name] = {"state": NOT_STARTED, "error": "not in the running scheduler; restart main.py to add it"}
+        if presets["gantry_source"] == "simulator":
+            payload = self.scheduler.snapshot()
+        else:
+            payload = self.scheduler.pos()
+        return statuses, (payload, "", "")
+
+    def close(self) -> None:
+        if self.poller is not None:
+            self.poller.close()
 
     @property
     def unsaved(self) -> bool:
@@ -69,7 +106,7 @@ class PresetsStore:
         presets = validate_presets(data)
         with self._lock:
             self._presets = presets
-            self.poller.set_targets(*poll_targets(presets))
+            self._retarget(presets)
         return presets
 
     def save(self) -> dict[str, Any]:
@@ -83,8 +120,19 @@ class PresetsStore:
         with self._lock:
             self._presets = presets
             self._saved = presets if self.path.exists() else None
-            self.poller.set_targets(*poll_targets(presets))
+            self._retarget(presets)
         return presets
+
+
+def move_scheduler(scheduler: Any, x: float, y: float) -> dict[str, Any]:
+    """Ask the in-process scheduler to move the gantry and describe the outcome."""
+    try:
+        scheduler.move_to(x, y)
+    except RuntimeError as error:
+        return {"ok": False, "message": f"Refused: {error}"}
+    except ValueError as error:
+        return {"ok": False, "message": str(error)}
+    return {"ok": True, "message": "Moving"}
 
 
 def move_gantry(address: str, x: float, y: float) -> dict[str, Any]:
@@ -148,7 +196,7 @@ def create_app(store: PresetsStore):
 
     @app.get("/api/snapshot")
     def get_snapshot() -> dict[str, Any]:
-        statuses, (payload, problem, detail) = store.poller.snapshot()
+        statuses, (payload, problem, detail) = store.readings()
         return {
             "statuses": statuses,
             "gantry": {"payload": payload, "problem": problem, "detail": detail},
@@ -157,30 +205,34 @@ def create_app(store: PresetsStore):
 
     @app.post("/api/move")
     def post_move(request: MoveRequest) -> dict[str, Any]:
+        if store.scheduler is not None:
+            return move_scheduler(store.scheduler, request.x, request.y)
         return move_gantry(store.get()["gantry_address"], request.x, request.y)
 
     return app
 
 
-def store_from_args(parser: argparse.ArgumentParser, presets: Path) -> PresetsStore:
-    poller = NodePoller()
+def store_from_args(parser: argparse.ArgumentParser, presets: Path, scheduler: Optional[Any] = None) -> PresetsStore:
+    """With ``scheduler`` the page reads it directly; without one it polls over HTTP."""
+    poller = None if scheduler is not None else NodePoller()
     try:
-        return PresetsStore(poller, presets)
+        return PresetsStore(poller, presets, scheduler=scheduler)
     except ValueError as error:
-        poller.close()
+        if poller is not None:
+            poller.close()
         parser.error(str(error))
 
 
-def serve(store: PresetsStore, port: int) -> None:
-    """Run the GUI until Ctrl+C, shared with main.py."""
+def serve(store: PresetsStore, port: int, app: Optional[Any] = None) -> None:
+    """Run the GUI (or ``app``, built from it) until Ctrl+C, shared with main.py."""
     import uvicorn
 
     print(f"gantry GUI on http://127.0.0.1:{port}", flush=True)
     try:
         # Loopback only: the page can move the gantry, so keep it off the network.
-        uvicorn.run(create_app(store), host="127.0.0.1", port=port, access_log=False)
+        uvicorn.run(app or create_app(store), host="127.0.0.1", port=port, access_log=False)
     finally:
-        store.poller.close()
+        store.close()
 
 
 def main() -> None:

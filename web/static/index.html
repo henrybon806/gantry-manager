@@ -148,7 +148,7 @@
 
     <section>
       <h2>GANTRY SOURCE</h2>
-      <p class="hint">Simulator reads GET /state from the gantry (python -m gantry) and places the gantry between your boxes. Lab reads GET /position (x, y), which the gantry also serves.</p>
+      <p class="hint">Simulator shows the scheduler's full view: the gantry between your boxes, the samples and the queue. Lab shows only the gantry's x, y. Under main.py both come straight from the scheduler; with python -m web alone, the address is where to read them.</p>
       <div class="row">
         <label class="radio"><input type="radio" name="source" value="simulator"> Simulator</label>
         <label class="radio"><input type="radio" name="source" value="lab"> Lab (HTTP)</label>
@@ -161,7 +161,7 @@
         <span class="small">move time</span>
         <input type="text" id="move-time" class="num" style="width:48px"><span class="small">s</span>
       </div>
-      <p class="hint">Home and move time are read by the gantry (python -m gantry) when it starts.</p>
+      <p class="hint">Home and move time are read by the scheduler when main.py starts.</p>
     </section>
 
     <section>

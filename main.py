@@ -1,16 +1,17 @@
-"""Run the gantry: the scheduler, its position API and the web GUI, in one process.
+"""Run the gantry: the scheduler and the web GUI, in one process.
 
     .venv/bin/python main.py             # then open http://127.0.0.1:8080
     .venv/bin/python main.py --no-gui    # scheduler only (same as python -m gantry)
 
 Start the experiment nodes in their own terminals (sim/ or lab-devices).
-Settings come from data/presets.json; the gantry flags (--node, --route,
---port, ...) are the same as python -m gantry's.
+Settings come from data/presets.json; the gantry flags (--node, --route, ...)
+are the same as python -m gantry's.
+
+The GUI reads the scheduler directly. Its API is served on the same port under
+/scheduler (e.g. GET /scheduler/state); with --no-gui it is served on --port.
 """
 
 import argparse
-import threading
-import time
 
 from gantry import server as gantry_server
 from web import server as web_server
@@ -23,35 +24,22 @@ def main() -> None:
     parser.add_argument("--no-gui", action="store_true", help="run the scheduler without the web GUI")
     args = parser.parse_args()
     scheduler, port, token = gantry_server.scheduler_from_args(parser, args)
-    store = None if args.no_gui else web_server.store_from_args(parser, args.presets)
+    scheduler_app = gantry_server.create_app(scheduler, token)
 
     import uvicorn
 
-    app = gantry_server.create_app(scheduler, token)
-    gantry = uvicorn.Server(uvicorn.Config(app, host=args.host, port=port, access_log=False))
     scheduler.start()
-    print(gantry_server.describe(scheduler, args.host, port), flush=True)
-    if store is None:
-        try:
-            gantry.run()
-        finally:
-            scheduler.stop()
-        return
-
-    # The gantry API runs in the background; the GUI owns the main thread and Ctrl+C.
-    thread = threading.Thread(target=gantry.run, name="gantry-api", daemon=True)
-    thread.start()
-    while not gantry.started and thread.is_alive():
-        time.sleep(0.05)
-    if not gantry.started:
-        scheduler.stop()
-        store.poller.close()
-        raise SystemExit(f"gantry could not listen on {args.host}:{port}")
     try:
-        web_server.serve(store, args.gui_port)
+        if args.no_gui:
+            print(gantry_server.describe(scheduler, f"http://{args.host}:{port}/state"), flush=True)
+            uvicorn.run(scheduler_app, host=args.host, port=port, access_log=False)
+            return
+        store = web_server.store_from_args(parser, args.presets, scheduler=scheduler)
+        app = web_server.create_app(store)
+        app.mount("/scheduler", scheduler_app)
+        print(gantry_server.describe(scheduler, f"http://127.0.0.1:{args.gui_port}/scheduler/state"), flush=True)
+        web_server.serve(store, args.gui_port, app)
     finally:
-        gantry.should_exit = True
-        thread.join(timeout=2.0)
         scheduler.stop()
 
 

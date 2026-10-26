@@ -68,7 +68,7 @@ Each experiment is its own process exposing labnode JSON status over HTTP. The G
 gantry/            the gantry
   scheduler.py       scheduling core: GantryManager, in-memory and remote experiment clients
   substrates.py      Substrate model and workflow state
-  server.py          scheduler thread + gantry API (/pos, /state); python -m gantry runs it without the GUI
+  server.py          scheduler thread + its API (/pos, /state); python -m gantry runs it without the GUI
 web/               the GUI, a local website (python -m web runs it alone)
   server.py          serves the page, polls nodes for it, forwards moves, saves presets
   static/index.html  the page
@@ -94,18 +94,19 @@ requirements.txt   labnode, pinned to a release tag
 
 ```mermaid
 flowchart LR
-	Browser[browser :8080] --> GUI
-	GUI[GUI :8080] -. GET /state .-> Gantry[scheduler + gantry API :8100]
-	GUI -. GET /status .-> A
-	GUI -. GET /status .-> B
-	GUI -. GET /status .-> C
-	Gantry -- start / taken / status --> A[experiment A :8001]
-	Gantry -- start / taken / status --> B[experiment B :8002]
-	Gantry -- start / taken / status --> C[experiment C :8003]
+	Browser[browser] --> Main
+	subgraph Main[python main.py :8080]
+		GUI[GUI] -- reads, moves --> Scheduler[scheduler]
+	end
+	Scheduler -- start / taken / status --> A[experiment A :8001]
+	Scheduler -- start / taken / status --> B[experiment B :8002]
+	Scheduler -- start / taken / status --> C[experiment C :8003]
 ```
 
-`python main.py` runs the GUI and the scheduler (with its gantry API) in one
-process on the computer attached to the gantry; each experiment node is its own
+`python main.py` runs the GUI and the scheduler in one process, on one port.
+The GUI reads everything (node statuses, the gantry, the samples) straight
+from the scheduler, and only the scheduler talks to the nodes. Each experiment
+node is its own
 process, usually on its instrument's computer. The GUI is an observer that can
 only move the gantry; the scheduler owns scheduling and transport state; each
 node owns its experiment.
@@ -168,11 +169,11 @@ a file, use the generic node instead:
 ```
 
 Real instruments live in [lab-devices](https://github.com/henrybon806/lab-devices);
-start a new one from its `_template/`. To point the gantry at real nodes, put their
+start a new one from its `templates/experiment/`. To point the gantry at real nodes, put their
 addresses in `data/presets.json` (or pass `--node`).
 
-To try the GUI's *Lab (HTTP)* mode without a real gantry, run the fake one
-with `python -m web` instead of `main.py` (it also uses port 8100):
+To try the GUI's *Lab (HTTP)* mode on its own, run the fake gantry (port 8100)
+with `python -m web` instead of `main.py`:
 
 ```bash
 .venv/bin/python sim/fake_gantry.py
@@ -181,14 +182,15 @@ with `python -m web` instead of `main.py` (it also uses port 8100):
 
 `main.py` with no arguments uses exactly those nodes and routes. It
 drives the nodes over HTTP (`POST /start`, `POST /taken`) on wall-clock time
-and serves `GET /state` for the GUI.
+and serves its API under `/scheduler` on the GUI's port (on `--port`, default
+8100, with `--no-gui`).
 
 `@x,y` is where each station sits on the bed. The gantry has its own `--home`
 spot, separate from the shelf: it starts there and travels to the shelf like
 any other location. Ask it where it is at any time:
 
 ```bash
-curl http://127.0.0.1:8100/pos
+curl http://127.0.0.1:8080/scheduler/pos
 # {"x": 21.2, "y": 36.7, "z": 0.0, "moving": true, "at": null}
 ```
 
@@ -197,7 +199,7 @@ while the gantry is moving, and needs `Authorization: Bearer $LABNODE_TOKEN`
 when a token is set):
 
 ```bash
-curl -X POST http://127.0.0.1:8100/pos -H 'content-type: application/json' -d '{"x": 40, "y": 20}'
+curl -X POST http://127.0.0.1:8080/scheduler/pos -H 'content-type: application/json' -d '{"x": 40, "y": 20}'
 ```
 
 The scheduler waits for the move, then carries on from that spot. In the GUI,
@@ -249,7 +251,7 @@ GET  /position   gantry node only
 
 ```bash
 curl http://127.0.0.1:8001/status
-curl http://127.0.0.1:8100/state
+curl http://127.0.0.1:8080/scheduler/state
 ```
 
 ## GUI
@@ -264,12 +266,14 @@ each experiment's state. It has no run controls: samples and routes are set on
 the gantry's command line (`--route A,B,C`, one per sample) and durations on
 each node. Restart `main.py` to run a new batch.
 
-- **Gantry source**: *Simulator* reads `GET /state` from the scheduler and
-  places the gantry between the stations it is moving between. *Lab (HTTP)* polls
-  `GET /position` (`{"x": .., "y": ..}`) on the gantry node.
+- **Gantry source**: *Simulator* shows the scheduler's full state and places
+  the gantry between the stations it is moving between. *Lab (HTTP)* shows only
+  the gantry's x, y. Under `main.py` both come from the scheduler directly; with
+  `python -m web` alone, *Simulator* polls `GET /state` and *Lab* polls
+  `GET /position` at the gantry address.
 - **Move gantry**: type bed x, y and press *Move gantry*, or double-click an
-  empty spot on the bed. It sends `POST /pos` (through the HOME/REF calibration
-  if set) and shows the reply, e.g. *Refused: gantry is busy moving*.
+  empty spot on the bed. It asks the scheduler to move (through the HOME/REF
+  calibration if set) and shows the reply, e.g. *Refused: gantry is busy moving*.
 - **Experiments**: set each node address (`http://host:port`, `host:port` or a
   port), drag boxes to place them, and add or remove experiments.
 - **Homing**: jog the gantry to a known spot and press *Set HOME here*, which

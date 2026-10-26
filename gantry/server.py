@@ -155,6 +155,11 @@ class Scheduler:
             self.manager.move_to((x, y))
             return self.manager.pos()
 
+    def node_statuses(self) -> dict[str, dict[str, Any]]:
+        """Each node's latest /status as the scheduler last read it."""
+        with self.lock:
+            return {name: dict(client.status) for name, client in self.manager.clients.items()}
+
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
             state = self.manager.snapshot()
@@ -265,10 +270,10 @@ def scheduler_from_args(parser: argparse.ArgumentParser, args: argparse.Namespac
     return Scheduler(manager), port, token
 
 
-def describe(scheduler: Scheduler, host: str, port: int) -> str:
+def describe(scheduler: Scheduler, state_url: str) -> str:
     manager = scheduler.manager
     stations = ", ".join(f"{name} {client.url}" for name, client in manager.clients.items())
-    return (f"gantry on http://{host}:{port}/state  |  {len(manager.substrates)} samples, "
+    return (f"scheduler on {state_url}  |  {len(manager.substrates)} samples, "
             f"{manager.shelf_slots} shelf slots  |  {stations}")
 
 
@@ -281,7 +286,7 @@ def main() -> None:
     import uvicorn
 
     scheduler.start()
-    print(describe(scheduler, args.host, port), flush=True)
+    print(describe(scheduler, f"http://{args.host}:{port}/state"), flush=True)
     try:
         uvicorn.run(create_app(scheduler, token), host=args.host, port=port, access_log=False)
     finally:
