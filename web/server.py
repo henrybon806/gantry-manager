@@ -84,9 +84,10 @@ class PresetsStore:
             if name != "shelf" and station["address"] and name not in statuses:
                 statuses[name] = {"state": NOT_STARTED, "error": "not in the running scheduler; restart main.py to add it"}
         if presets["gantry_source"] == "simulator":
-            payload = self.scheduler.snapshot()
-        else:
-            payload = self.scheduler.pos()
+            return statuses, (self.scheduler.snapshot(), "", "")
+        payload = self.scheduler.pos()
+        if payload["x"] is None:
+            return statuses, (None, payload["problem"], payload["detail"])
         return statuses, (payload, "", "")
 
     def gantry_link(self) -> Optional[dict[str, Any]]:

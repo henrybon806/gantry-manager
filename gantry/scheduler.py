@@ -257,7 +257,26 @@ class GantryManager:
         return queue
 
     def coordinates(self) -> Optional[Point]:
-        """Where the gantry head is right now, or None without ``locations``."""
+        """The gantry's exact position, or None when it cannot be read."""
+        return self.position_reading()[0]
+
+    def position_reading(self) -> tuple[Optional[Point], str, str, str]:
+        """``(point, source, problem, detail)`` for the gantry head.
+
+        With a gantry node, ``point`` is what the node last reported (source
+        "gantry"); if it cannot be read, ``point`` is None and ``problem`` says
+        why. Without one, the gantry is only simulated (source "simulated").
+        """
+        if self.gantry is not None:
+            point, problem, detail = self.gantry.position()
+            return point, "gantry", problem, detail
+        point = self._simulated_coordinates()
+        if point is None:
+            return None, "simulated", UNREADABLE, "gantry has no locations configured"
+        return point, "simulated", "", ""
+
+    def _simulated_coordinates(self) -> Optional[Point]:
+        """Where a simulated gantry is, from the scheduler's own timing."""
         if not self.locations:
             return None
         transport = self._transport
@@ -279,17 +298,18 @@ class GantryManager:
         )
 
     def pos(self) -> dict[str, Any]:
-        """Payload for the gantry's GET /pos."""
-        point = self.coordinates()
-        if point is None:
-            raise ValueError("gantry has no locations configured")
+        """Payload for GET /pos. ``x`` and ``y`` are None when the gantry cannot be read."""
+        point, source, problem, detail = self.position_reading()
         moving = self.gantry_busy
         return {
-            "x": point[0],
-            "y": point[1],
+            "x": None if point is None else point[0],
+            "y": None if point is None else point[1],
             "z": 0.0,
             "moving": moving,
             "at": None if moving or self.position == MANUAL else self.position,
+            "source": source,
+            "problem": problem or None,
+            "detail": detail or None,
         }
 
     def move_to(self, point: Point) -> None:
@@ -304,7 +324,7 @@ class GantryManager:
             raise ValueError("x and y must be finite numbers")
         if self.gantry_busy:
             raise RuntimeError("gantry is busy moving; try again when it stops")
-        start = self.coordinates()
+        start = self._simulated_coordinates()
         assert start is not None
         self._manual_move = _ManualMove(start, (float(point[0]), float(point[1])), self.now + self.movement_time)
         self._command("move", x=float(point[0]), y=float(point[1]), params={"to": MANUAL})
@@ -329,7 +349,8 @@ class GantryManager:
         return self.locations[position]
 
     def snapshot(self, event_limit: int = 200) -> dict[str, Any]:
-        """JSON-ready view of the whole scheduler, served by the gantry node."""
+        """JSON-ready view of the whole scheduler, served at /state."""
+        point, source, problem, detail = self.position_reading()
         return {
             "now": self.now,
             "completed": self.completed,
@@ -342,7 +363,10 @@ class GantryManager:
                 "to": list(self._manual_move.end),
                 "arrives_at": self._manual_move.arrives_at,
             },
-            "coordinates": self.coordinates(),
+            "coordinates": None if point is None else list(point),
+            "coordinates_source": source,
+            "coordinates_problem": problem or None,
+            "coordinates_detail": detail or None,
             "locations": self.locations,
             "clients": {
                 name: {

@@ -74,6 +74,10 @@ def serve_text(body, status=200):
     return server
 
 
+# What pos() adds when there is no gantry node: the position is the simulated one.
+SIMULATED = {"source": "simulated", "problem": None, "detail": None}
+
+
 class GantrySimulationTests(unittest.TestCase):
     def test_new_substrate_can_join_a_running_queue(self):
         client = ExperimentClient("experiment_a", duration=3.0)
@@ -253,7 +257,7 @@ class GantrySimulationTests(unittest.TestCase):
         manager.tick(1.5)
         self.assertEqual(manager.coordinates(), (20.0, 10.0))
         manager.tick(2.0)
-        self.assertEqual(manager.pos(), {"x": 30.0, "y": 20.0, "z": 0.0, "moving": False, "at": "experiment_a"})
+        self.assertEqual(manager.pos(), {"x": 30.0, "y": 20.0, "z": 0.0, "moving": False, "at": "experiment_a", **SIMULATED})
         with self.assertRaises(ValueError):
             GantryManager([client], [], locations={"shelf": (0.0, 0.0)})
 
@@ -269,7 +273,7 @@ class GantrySimulationTests(unittest.TestCase):
         self.assertEqual(manager.coordinates(), (20.0, 10.0))
         self.assertTrue(manager.pos()["moving"])
         manager.tick(1.0)
-        self.assertEqual(manager.pos(), {"x": 40.0, "y": 20.0, "z": 0.0, "moving": False, "at": None})
+        self.assertEqual(manager.pos(), {"x": 40.0, "y": 20.0, "z": 0.0, "moving": False, "at": None, **SIMULATED})
 
         # A queued sample starts from the manual spot.
         manager.add_substrate(Substrate("sample_1", ("experiment_a",)))
@@ -324,6 +328,10 @@ class GantrySimulationTests(unittest.TestCase):
         link = GantryLink(f"127.0.0.1:{free_port()}", timeout=0.5)
         self.addCleanup(link.close)
         self.assertIsNone(link.report()["last"])
+        deadline = time.monotonic() + 3
+        while "no answer yet" in link.position()[2] and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertEqual(link.position()[:2], (None, NOT_STARTED))
         link.send("move", x=1.0, y=2.0)
         link.wait_idle()
         report = link.report()
@@ -351,6 +359,16 @@ class GantrySimulationTests(unittest.TestCase):
             self.assertTrue(link.report()["last"]["ok"])
             node.wait(2)
             self.assertEqual(node.position()["x"], 3.0)
+            # The link reports exactly what the node says, a moment later.
+            deadline = time.monotonic() + 2
+            while link.position()[0] != (3.0, 4.0) and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertEqual(link.position(), ((3.0, 4.0), "", ""))
+
+            manager = GantryManager([], [], locations={"home": (0.0, 0.0), "shelf": (1.0, 1.0)}, gantry=link)
+            self.assertEqual(manager.pos()["x"], 3.0)
+            self.assertEqual(manager.pos()["source"], "gantry")
+            self.assertEqual(manager.snapshot()["coordinates"], [3.0, 4.0])
             link.send("pick", params={"station": "experiment_a"})
             link.wait_idle()
             self.assertEqual(link.report()["last"]["message"], "pick sent")

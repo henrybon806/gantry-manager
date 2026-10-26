@@ -1,5 +1,8 @@
 """Sends the scheduler's commands to the gantry node (move, pick, place).
 
+It also listens to the gantry's /status on its own thread, so ``position``
+is the gantry's real (x, y) as last reported, never an estimate.
+
 Fire and check: commands go out in order on the link's own thread, so the
 scheduler never waits on the network. Before each command the link waits
 (up to READY_TIMEOUT) for the gantry to finish the previous one. The scheduler
@@ -15,12 +18,14 @@ import threading
 import time
 from typing import Any, Optional
 
-from labnode import NodeClient, NodeError, NodeUnreachable
+from labnode import NodeClient, NodeError, NodeListener, NodeUnreachable
+from labnode.listen import UNREADABLE
 
 
 REQUEST_TIMEOUT = 2.0
 READY_TIMEOUT = 30.0
 READY_POLL = 0.05
+POSITION_POLL = 0.1
 
 
 class GantryLink:
@@ -33,6 +38,21 @@ class GantryLink:
         self._queue: "queue.Queue[Optional[tuple[str, dict[str, Any]]]]" = queue.Queue()
         self._thread = threading.Thread(target=self._run, name="gantry-link", daemon=True)
         self._thread.start()
+        self.listener = NodeListener(self.address, "/status", interval=POSITION_POLL)
+
+    def position(self) -> tuple[Optional[tuple[float, float]], str, str]:
+        """``((x, y), "", "")`` from the gantry's latest /status, else ``(None, problem, detail)``.
+
+        ``problem`` is NOT_STARTED or UNREADABLE, as for any node.
+        """
+        payload, problem, detail = self.listener.latest()
+        if problem:
+            return None, problem, detail
+        try:
+            position = payload["position"]
+            return (float(position["x"]), float(position["y"])), "", ""
+        except (KeyError, TypeError, ValueError):
+            return None, UNREADABLE, "the gantry's /status has no position"
 
     def send(self, command: str, **arguments: Any) -> None:
         """Queue ``move``, ``pick`` or ``place`` (NodeClient method names)."""
@@ -52,6 +72,7 @@ class GantryLink:
     def close(self) -> None:
         self._queue.put(None)
         self._thread.join(timeout=1.0)
+        self.listener.close()
 
     def _run(self) -> None:
         while True:

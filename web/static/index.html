@@ -470,25 +470,6 @@ async function poll() {
   setTimeout(poll, POLL_MS);
 }
 
-function simulatedPosition(state) {
-  // Stations come from this presets; anything else (the gantry's home) from the gantry.
-  const points = { ...(state.locations || {}) };
-  for (const s of presets.stations) points[s.name] = [s.x, s.y];
-  const transport = state.transport;
-  if (state.manual_move || !(state.position in points)) {
-    const c = state.coordinates;
-    return c ? [Number(c[0]), Number(c[1])] : null;
-  }
-  if (!transport) return points[state.position];
-  const pickup = transport.phase === "pickup";
-  const startName = pickup ? transport.position : transport.source;
-  const endName = pickup ? transport.source : transport.destination;
-  if (!(startName in points) || !(endName in points)) return null;
-  const start = points[startName], end = points[endName];
-  const progress = Math.min(1, Math.max(0, (state.now - transport.started_at) / state.movement_time));
-  return [start[0] + (end[0] - start[0]) * progress, start[1] + (end[1] - start[1]) * progress];
-}
-
 function showGantryLink(link) {
   // Under main.py: how the gantry node answered the scheduler's last command.
   const el = $("gantry-link");
@@ -507,17 +488,25 @@ function applySnapshot(snap) {
   statuses = snap.statuses || {};
   const simulator = presets.gantry_source === "simulator";
   let { payload, problem, detail } = snap.gantry;
-  let raw = null, state = null;
+  // The dot is drawn only where the scheduler says the gantry is; nothing is guessed here.
+  let raw = null, state = null, source = null;
   if (!problem && payload !== null && payload !== undefined) {
     try {
       if (simulator) {
         if (typeof payload !== "object" || !("position" in payload) || !("now" in payload)) throw new Error();
         state = payload;
-        raw = simulatedPosition(state);
-        if (raw === null) detail = "gantry location not on the bed presets";
+        source = state.coordinates_source;
+        if (state.coordinates) {
+          raw = [Number(state.coordinates[0]), Number(state.coordinates[1])];
+          if (!raw.every(Number.isFinite)) throw new Error();
+        } else {
+          problem = state.coordinates_problem || UNREADABLE;
+          detail = state.coordinates_detail || "no gantry position";
+        }
       } else {
         raw = [Number(payload.x), Number(payload.y)];
         if (!raw.every(Number.isFinite)) throw new Error();
+        source = payload.source;
       }
     } catch {
       raw = null; state = null; problem = UNREADABLE; detail = "unexpected response";
@@ -533,7 +522,8 @@ function applySnapshot(snap) {
     readout.className = "mono bad";
   } else {
     const bed = calibration.toBed(raw);
-    readout.textContent = `RAW ${raw[0].toFixed(1)}, ${raw[1].toFixed(1)}  →  BED ${bed[0].toFixed(1)}, ${bed[1].toFixed(1)}`;
+    const label = source === "simulated" ? "  SIMULATED" : "";
+    readout.textContent = `RAW ${raw[0].toFixed(1)}, ${raw[1].toFixed(1)}  →  BED ${bed[0].toFixed(1)}, ${bed[1].toFixed(1)}${label}`;
     readout.className = "mono";
   }
   const cal = $("calibration");

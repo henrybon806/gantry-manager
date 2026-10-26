@@ -157,6 +157,11 @@ GUI shows it under the gantry readout (e.g. *move not available: gantry NOT
 STARTED*) and the terminal prints it once. Clear the gantry address (or pass
 `--gantry ""`) to only simulate the gantry.
 
+The gantry position the GUI draws is always the one the gantry node reports
+(the scheduler listens to its `/status`), never an estimate. If the node cannot
+be read, no dot is drawn and the readout says why. Only with no gantry address
+is the position simulated, and the readout then says *SIMULATED*.
+
 `main.py --no-gui` (or `python -m gantry`) runs the scheduler and its API
 without the GUI, on `--port` (default 8200); `python -m web` runs only the GUI, to watch a gantry running
 elsewhere. `--gui-port` moves the GUI off 8080.
