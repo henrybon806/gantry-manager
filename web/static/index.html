@@ -1,0 +1,870 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gantry Lab</title>
+<link rel="icon" href="data:,">
+<style>
+  :root {
+    --paper: #f4f1ea;
+    --card: #fffdf8;
+    --bed: #f8f5ee;
+    --line: #d8d1c5;
+    --grid: #ebe5d9;
+    --ink: #263238;
+    --text: #526064;
+    --muted: #7c8788;
+    --faint: #9aa3a5;
+    --heading: #6d7779;
+    --idle: #6b9da0;
+    --busy: #d56b55;
+    --done: #bf6b2e;
+    --bad: #b64242;
+    --ok: #4e9560;
+    --shelf: #d7a84d;
+    --head: #a5d6a7;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--paper);
+    color: var(--text);
+    font: 13px/1.4 -apple-system, "Helvetica Neue", Helvetica, Arial, sans-serif;
+    display: flex;
+    flex-direction: column;
+  }
+  header {
+    background: var(--ink);
+    color: var(--paper);
+    padding: 0 28px;
+    height: 56px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex: none;
+  }
+  header h1 { margin: 0; font-size: 20px; letter-spacing: 0.04em; }
+  header .live { font: 12px Menlo, monospace; color: var(--head); }
+  main {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    gap: 16px;
+    padding: 14px 18px;
+  }
+  #bed-wrap {
+    flex: 1;
+    min-width: 0;
+    background: var(--card);
+    border: 1px solid var(--line);
+    position: relative;
+  }
+  #bed { position: absolute; inset: 0; width: 100%; height: 100%; user-select: none; touch-action: none; }
+  /* Shapes are redrawn every poll; hit-testing is done in script against the svg itself. */
+  #bed * { pointer-events: none; }
+  aside {
+    width: 340px;
+    flex: none;
+    overflow-y: auto;
+  }
+  section { margin-bottom: 14px; }
+  h2 { margin: 0 0 2px; font-size: 12px; letter-spacing: 0.05em; color: var(--heading); }
+  .hint { margin: 0 0 6px; font-size: 11px; color: var(--muted); }
+  .row { display: flex; align-items: center; gap: 6px; margin: 3px 0; flex-wrap: wrap; }
+  .row .grow { flex: 1; min-width: 0; }
+  label.radio { display: inline-flex; align-items: center; gap: 3px; cursor: pointer; }
+  input[type=text] {
+    font: 12px Menlo, monospace;
+    color: var(--text);
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    padding: 3px 5px;
+    min-width: 0;
+  }
+  input.num { width: 64px; }
+  textarea {
+    width: 100%;
+    font: 12px Menlo, monospace;
+    color: var(--text);
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    padding: 4px 5px;
+    resize: vertical;
+  }
+  button.primary { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+  button.primary:hover:not(:disabled) { background: #37474f; }
+  #presets-bar { background: var(--card); border: 1px solid var(--line); padding: 8px 10px; }
+  input.addr { width: 130px; }
+  button {
+    font: inherit;
+    color: var(--ink);
+    background: var(--card);
+    border: 1px solid #b9b1a3;
+    border-radius: 4px;
+    padding: 3px 10px;
+    cursor: pointer;
+  }
+  button:hover:not(:disabled) { background: #fff; border-color: var(--ink); }
+  button.wide { white-space: nowrap; min-width: 112px; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  .mono { font: 12px Menlo, monospace; }
+  .small { font-size: 11px; }
+  .bad { color: var(--bad); }
+  .good { color: var(--ok); }
+  .warn { color: var(--done); }
+  #readout { color: var(--ink); min-height: 1.4em; }
+  #stations { width: 100%; border-collapse: collapse; background: var(--card); }
+  #stations th { text-align: left; font-size: 10px; color: var(--muted); padding: 3px 3px 1px; }
+  #stations td { padding: 2px 3px; }
+  #stations td.name { font: bold 12px Menlo, monospace; color: var(--text); white-space: nowrap; }
+  #stations input.num { width: 48px; }
+  .remove { color: var(--bad); cursor: pointer; border: 0; background: none; padding: 0 4px; font-size: 14px; }
+  @media (max-width: 760px) {
+    main { flex-direction: column; padding: 12px 16px; }
+    #bed-wrap { min-height: 360px; }
+    aside { width: 100%; overflow: visible; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>GANTRY LAB</h1>
+  <span class="live" id="live">connecting…</span>
+</header>
+<main>
+  <div id="bed-wrap"><svg id="bed" xmlns="http://www.w3.org/2000/svg"></svg></div>
+  <aside>
+    <section id="presets-bar">
+      <div class="row">
+        <h2 class="grow" style="margin:0">PRESETS</h2>
+        <button id="reload-presets" title="Discard unsaved changes and re-read the file">Reload</button>
+        <button id="save-presets" class="primary">Save presets</button>
+      </div>
+      <div id="presets-status" class="mono small"></div>
+    </section>
+
+    <section>
+      <h2>GANTRY SOURCE</h2>
+      <p class="hint">Simulator reads GET /state from the gantry (python -m gantry) and places the gantry between your boxes. Lab reads GET /position (x, y), which the gantry also serves.</p>
+      <div class="row">
+        <label class="radio"><input type="radio" name="source" value="simulator"> Simulator</label>
+        <label class="radio"><input type="radio" name="source" value="lab"> Lab (HTTP)</label>
+        <input type="text" id="gantry-address" class="grow" spellcheck="false">
+      </div>
+      <div id="readout" class="mono"></div>
+      <div class="row">
+        <span class="small">home</span>
+        <input type="text" id="home-pos-x" class="num">,<input type="text" id="home-pos-y" class="num">
+        <span class="small">move time</span>
+        <input type="text" id="move-time" class="num" style="width:48px"><span class="small">s</span>
+      </div>
+      <p class="hint">Home and move time are read by the gantry (python -m gantry) when it starts.</p>
+    </section>
+
+    <section>
+      <h2>MOVE GANTRY</h2>
+      <p class="hint">Bed coordinates; sends POST /pos to the gantry. Double-click the bed to move there. Refused while the gantry is moving.</p>
+      <form class="row" id="move-form">
+        <span class="mono">x</span><input type="text" id="move-x" class="num" value="50">
+        <span class="mono">y</span><input type="text" id="move-y" class="num" value="30">
+        <button type="submit" id="move-button">Move gantry</button>
+      </form>
+      <div id="move-result" class="mono small"></div>
+    </section>
+
+    <section>
+      <h2>HOMING</h2>
+      <p class="hint">Jog the gantry to a known spot and capture it. HOME sets the offset; REF (a second spot) sets the scale.</p>
+      <div class="row">
+        <button id="set-home" class="wide">Set HOME here</button>
+        <span class="small">bed</span>
+        <input type="text" id="home-x" class="num" value="0">,<input type="text" id="home-y" class="num" value="0">
+      </div>
+      <div class="row">
+        <button id="set-ref" class="wide">Set REF here</button>
+        <span class="small">bed</span>
+        <input type="text" id="ref-x" class="num" value="10">,<input type="text" id="ref-y" class="num" value="10">
+      </div>
+      <div class="row">
+        <span id="calibration" class="mono small grow"></span>
+        <button id="clear-calibration">Clear</button>
+      </div>
+    </section>
+
+    <section>
+      <h2>BED &amp; SHELF</h2>
+      <div class="row">
+        <input type="text" id="bed-w" class="num"> × <input type="text" id="bed-h" class="num">
+        <span class="small">bed units (origin bottom-left)</span>
+      </div>
+      <div class="row">
+        <input type="text" id="shelf-slots" class="num" style="width:48px">
+        <span class="small">shelf slots (1–30)</span>
+      </div>
+    </section>
+
+    <section>
+      <h2>EXPERIMENTS</h2>
+      <p class="hint">Drag boxes on the bed to place them. Node is http://host:port, host:port or just port.</p>
+      <table id="stations">
+        <thead><tr><th>NAME</th><th>NODE</th><th>X</th><th>Y</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <form class="row" id="add-form">
+        <input type="text" id="new-name" class="grow" spellcheck="false">
+        <button type="submit">Add experiment</button>
+      </form>
+    </section>
+
+    <section>
+      <h2>SAMPLES</h2>
+      <p class="hint">One route per line, e.g. A,B,C (letters or station names). Read by the gantry when it starts; restart it to run a new batch.</p>
+      <textarea id="routes" rows="4" spellcheck="false"></textarea>
+      <div id="routes-count" class="mono small"></div>
+    </section>
+
+    <div id="error" class="bad small"></div>
+  </aside>
+</main>
+
+<script>
+"use strict";
+
+const POLL_MS = 150;
+const BED_MARGIN = 44;
+const HALF_W = 52;
+const HALF_H = 32;
+const NOT_STARTED = "not started";
+const UNREADABLE = "unreadable";
+const COLORS = {
+  idle: "var(--idle)", busy: "var(--busy)", stopping: "var(--bad)", done: "var(--done)",
+  stopped: "var(--bad)", error: "var(--bad)", [NOT_STARTED]: "var(--faint)",
+  [UNREADABLE]: "var(--bad)", shelf: "var(--shelf)",
+};
+
+const $ = (id) => document.getElementById(id);
+const svg = $("bed");
+
+let presets = null;          // as stored by the server
+let statuses = {};
+let gantryRaw = null;       // [x, y] in gantry coordinates
+let gantryState = null;     // /state payload in simulator mode
+let gantryProblem = "";
+let drag = null;            // {name, dx, dy}
+let hover = null;           // [bx, by]
+let view = { scale: 1, ox: 0, oy: 0 };
+let saveTimer = null;
+let lastPollOk = false;
+
+// ------------------------------------------------------------- helpers
+
+function problemLabel(problem) {
+  return { [NOT_STARTED]: "NOT STARTED", [UNREADABLE]: "UNABLE TO READ" }[problem] || problem.toUpperCase();
+}
+function num(text) {
+  const value = Number(String(text).trim());
+  return String(text).trim() !== "" && Number.isFinite(value) ? value : null;
+}
+function fmt(value) { return Number(value.toFixed(4)).toString(); }
+function stationLabel(name) { return name.replace("experiment_", "EXP ").toUpperCase(); }
+function addressPort(address) {
+  let text = address.trim().replace(/\/+$/, "");
+  if (!text) return "?";
+  if (!text.includes("://")) text = "http://" + (text.includes(":") ? text : "127.0.0.1:" + text);
+  try { return new URL(text).port || "?"; } catch { return "?"; }
+}
+function esc(text) {
+  return String(text).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+function setError(text) { $("error").textContent = text; }
+
+// --------------------------------------------------------- calibration
+
+const calibration = {
+  get c() { return presets.calibration; },
+  get homed() { return this.c.home_raw !== null; },
+  toBed([x, y]) {
+    const c = this.c;
+    if (!c.home_raw) return [x, y];
+    return [c.home_bed[0] + (x - c.home_raw[0]) * c.scale[0], c.home_bed[1] + (y - c.home_raw[1]) * c.scale[1]];
+  },
+  toRaw([x, y]) {
+    const c = this.c;
+    if (!c.home_raw) return [x, y];
+    return [c.home_raw[0] + (x - c.home_bed[0]) / c.scale[0], c.home_raw[1] + (y - c.home_bed[1]) / c.scale[1]];
+  },
+  setHome(raw, bed) { this.c.home_raw = raw; this.c.home_bed = bed; },
+  setReference(raw, bed) {
+    const c = this.c;
+    if (!c.home_raw) throw new Error("Set HOME before the reference point.");
+    const scale = [0, 1].map((axis) => {
+      const rawSpan = raw[axis] - c.home_raw[axis];
+      const bedSpan = bed[axis] - c.home_bed[axis];
+      if (rawSpan === 0 || bedSpan === 0) {
+        throw new Error(`REF must differ from HOME on the ${"XY"[axis]} axis (both raw and bed).`);
+      }
+      return bedSpan / rawSpan;
+    });
+    c.scale = scale;
+  },
+  clear() { presets.calibration = { home_raw: null, home_bed: [0, 0], scale: [1, 1] }; },
+};
+
+// -------------------------------------------------------------- presets
+
+let presetsFile = "data/presets.json";
+let unsaved = false;
+
+function showPresetsStatus() {
+  const status = $("presets-status");
+  status.textContent = unsaved ? `Unsaved changes (not in ${presetsFile} yet)` : `Saved in ${presetsFile}`;
+  status.className = `mono small ${unsaved ? "warn" : "good"}`;
+}
+
+function takeReply(reply) {
+  presetsFile = reply.file;
+  unsaved = reply.unsaved;
+  showPresetsStatus();
+}
+
+async function loadPresets() {
+  const response = await fetch("/api/presets");
+  const reply = await response.json();
+  presets = reply.presets;
+  takeReply(reply);
+  fillForm();
+}
+
+// Edits go to the server right away (so every tab agrees) but only reach the
+// file when Save presets is pressed.
+function pushPresets() {
+  unsaved = true;
+  showPresetsStatus();
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(async () => {
+    saveTimer = null;
+    try {
+      const response = await fetch("/api/presets", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(presets),
+      });
+      const reply = await response.json();
+      if (!response.ok) return setError(`Not applied: ${reply.detail}`);
+      setError("");
+      takeReply(reply);
+    } catch {
+      setError("Not applied: the GUI server is not running");
+    }
+  }, 250);
+}
+
+async function presetsAction(path, button) {
+  clearTimeout(saveTimer);
+  saveTimer = null;
+  button.disabled = true;
+  try {
+    if (path === "save") {
+      // Make sure the server has the latest edits before writing the file.
+      const put = await fetch("/api/presets", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(presets),
+      });
+      if (!put.ok) throw new Error((await put.json()).detail);
+    }
+    const response = await fetch(`/api/presets/${path}`, { method: "POST" });
+    const reply = await response.json();
+    if (!response.ok) throw new Error(reply.detail);
+    presets = reply.presets;
+    takeReply(reply);
+    fillForm();
+    setError("");
+  } catch (error) {
+    setError(`${path === "save" ? "Not saved" : "Not reloaded"}: ${error.message || "the GUI server is not running"}`);
+  } finally {
+    button.disabled = false;
+  }
+}
+$("save-presets").addEventListener("click", (event) => presetsAction("save", event.currentTarget));
+$("reload-presets").addEventListener("click", (event) => presetsAction("reload", event.currentTarget));
+
+function station(name) { return presets.stations.find((s) => s.name === name); }
+
+function fillForm() {
+  document.querySelectorAll("input[name=source]").forEach((radio) => {
+    radio.checked = radio.value === presets.gantry_source;
+  });
+  $("gantry-address").value = presets.gantry_address;
+  $("bed-w").value = fmt(presets.bed[0]);
+  $("bed-h").value = fmt(presets.bed[1]);
+  $("home-pos-x").value = fmt(presets.gantry_home[0]);
+  $("home-pos-y").value = fmt(presets.gantry_home[1]);
+  $("move-time").value = fmt(presets.move_time);
+  $("shelf-slots").value = presets.shelf_slots;
+  $("routes").value = presets.routes.join("\n");
+  showRouteCount();
+  renderStationRows();
+  suggestName();
+}
+
+function renderStationRows() {
+  const body = $("stations").querySelector("tbody");
+  body.innerHTML = "";
+  for (const s of presets.stations) {
+    const row = document.createElement("tr");
+    row.dataset.name = s.name;
+    const shelf = s.name === "shelf";
+    row.innerHTML = `
+      <td class="name">${esc(stationLabel(s.name))}</td>
+      <td>${shelf ? '<span class="mono" style="color:var(--faint)">--</span>'
+                  : `<input type="text" class="addr" data-key="address" value="${esc(s.address)}" spellcheck="false">`}</td>
+      <td><input type="text" class="num" data-key="x" value="${fmt(s.x)}"></td>
+      <td><input type="text" class="num" data-key="y" value="${fmt(s.y)}"></td>
+      <td>${shelf ? "" : '<button class="remove" title="Remove">✕</button>'}</td>`;
+    body.appendChild(row);
+  }
+}
+
+function syncRow(name) {
+  const s = station(name);
+  const row = $("stations").querySelector(`tr[data-name="${CSS.escape(name)}"]`);
+  if (!s || !row) return;
+  row.querySelector('[data-key="x"]').value = fmt(s.x);
+  row.querySelector('[data-key="y"]').value = fmt(s.y);
+}
+
+function suggestName() {
+  const names = new Set(presets.stations.map((s) => s.name));
+  const letter = [..."abcdefghijklmnopqrstuvwxyz"].find((l) => !names.has(`experiment_${l}`));
+  $("new-name").value = letter ? `experiment_${letter}` : "";
+}
+
+// ------------------------------------------------------------- polling
+
+async function poll() {
+  try {
+    const response = await fetch("/api/snapshot");
+    if (!response.ok) throw new Error();
+    const snap = await response.json();
+    applySnapshot(snap);
+    if (snap.unsaved !== unsaved && !saveTimer) { unsaved = snap.unsaved; showPresetsStatus(); }
+    lastPollOk = true;
+  } catch {
+    lastPollOk = false;
+    statuses = {};
+    gantryRaw = null;
+    gantryState = null;
+    gantryProblem = "GUI SERVER DOWN";
+    $("readout").textContent = "GUI server not running (python main.py)";
+    $("readout").className = "mono bad";
+  }
+  $("live").textContent = lastPollOk ? "LIVE" : "GUI SERVER DOWN";
+  $("live").style.color = lastPollOk ? "" : "#ef9a9a";
+  draw();
+  setTimeout(poll, POLL_MS);
+}
+
+function simulatedPosition(state) {
+  // Stations come from this presets; anything else (the gantry's home) from the gantry.
+  const points = { ...(state.locations || {}) };
+  for (const s of presets.stations) points[s.name] = [s.x, s.y];
+  const transport = state.transport;
+  if (state.manual_move || !(state.position in points)) {
+    const c = state.coordinates;
+    return c ? [Number(c[0]), Number(c[1])] : null;
+  }
+  if (!transport) return points[state.position];
+  const pickup = transport.phase === "pickup";
+  const startName = pickup ? transport.position : transport.source;
+  const endName = pickup ? transport.source : transport.destination;
+  if (!(startName in points) || !(endName in points)) return null;
+  const start = points[startName], end = points[endName];
+  const progress = Math.min(1, Math.max(0, (state.now - transport.started_at) / state.movement_time));
+  return [start[0] + (end[0] - start[0]) * progress, start[1] + (end[1] - start[1]) * progress];
+}
+
+function applySnapshot(snap) {
+  statuses = snap.statuses || {};
+  const simulator = presets.gantry_source === "simulator";
+  let { payload, problem, detail } = snap.gantry;
+  let raw = null, state = null;
+  if (!problem && payload !== null && payload !== undefined) {
+    try {
+      if (simulator) {
+        if (typeof payload !== "object" || !("position" in payload) || !("now" in payload)) throw new Error();
+        state = payload;
+        raw = simulatedPosition(state);
+        if (raw === null) detail = "gantry location not on the bed presets";
+      } else {
+        raw = [Number(payload.x), Number(payload.y)];
+        if (!raw.every(Number.isFinite)) throw new Error();
+      }
+    } catch {
+      raw = null; state = null; problem = UNREADABLE; detail = "unexpected response";
+    }
+  }
+  gantryRaw = raw;
+  gantryState = state;
+  gantryProblem = problem ? problemLabel(problem) : (payload == null ? "NO ADDRESS" : "OFF LAYOUT");
+
+  const readout = $("readout");
+  if (raw === null) {
+    readout.textContent = (problem ? `${problemLabel(problem)}  ${detail}` : detail || "NO GANTRY ADDRESS").slice(0, 80);
+    readout.className = "mono bad";
+  } else {
+    const bed = calibration.toBed(raw);
+    readout.textContent = `RAW ${raw[0].toFixed(1)}, ${raw[1].toFixed(1)}  →  BED ${bed[0].toFixed(1)}, ${bed[1].toFixed(1)}`;
+    readout.className = "mono";
+  }
+  const cal = $("calibration");
+  if (calibration.homed) {
+    const [sx, sy] = presets.calibration.scale;
+    cal.textContent = `HOMED  scale ${Number(sx.toPrecision(4))}, ${Number(sy.toPrecision(4))}`;
+    cal.className = "mono small grow good";
+  } else {
+    cal.textContent = "NOT HOMED  showing raw coordinates";
+    cal.className = "mono small grow warn";
+  }
+}
+
+// ------------------------------------------------------------- drawing
+
+function bedSize() {
+  const [w, h] = presets.bed;
+  return w > 0 && h > 0 ? [w, h] : [100, 60];
+}
+function toCanvas(x, y) { return [view.ox + x * view.scale, view.oy - y * view.scale]; }
+function toBed(cx, cy) { return [(cx - view.ox) / view.scale, (view.oy - cy) / view.scale]; }
+function gridStep(span) {
+  for (const magnitude of [1, 10, 100, 1000, 10000]) {
+    for (const base of [1, 2, 5]) if (base * magnitude >= span / 12) return base * magnitude;
+  }
+  return span;
+}
+function text(x, y, content, attrs = "") {
+  return `<text x="${x}" y="${y}" ${attrs}>${esc(content)}</text>`;
+}
+
+function draw() {
+  if (!presets) return;
+  const box = svg.getBoundingClientRect();
+  const width = Math.max(box.width, 200), height = Math.max(box.height, 200);
+  const [bedW, bedH] = bedSize();
+  // On narrow screens the legend goes under the title, so the bed starts lower.
+  const narrow = width < 620;
+  const top = BED_MARGIN + (narrow ? 26 : 10);
+  view.scale = Math.min((width - 2 * BED_MARGIN) / bedW, (height - top - BED_MARGIN) / bedH);
+  view.ox = BED_MARGIN;
+  view.oy = top + bedH * view.scale;
+  const [left, bottom] = toCanvas(0, 0);
+  const [right, upper] = toCanvas(bedW, bedH);
+  const parts = [];
+  const mono = 'font-family="Menlo, monospace"';
+
+  parts.push(text(20, 24, "GANTRY BED  /  LIVE POSITION", 'font-size="12" font-weight="bold" fill="var(--heading)"'));
+  parts.push(text(narrow ? 20 : width - 20, narrow ? 40 : 24, "TEAL IDLE   RED BUSY   AMBER DONE   GREY NOT STARTED",
+    `text-anchor="${narrow ? "start" : "end"}" font-size="${narrow ? 9 : 10}" font-weight="bold" fill="var(--muted)" ${mono}`));
+  parts.push(`<rect x="${left}" y="${upper}" width="${right - left}" height="${bottom - upper}" fill="var(--bed)" stroke="var(--line)" stroke-width="2"/>`);
+
+  const step = gridStep(Math.max(bedW, bedH));
+  for (let v = 0; v <= bedW + 1e-9; v += step) {
+    const [x] = toCanvas(v, 0);
+    parts.push(`<line x1="${x}" y1="${upper}" x2="${x}" y2="${bottom}" stroke="var(--grid)"/>`);
+    parts.push(text(x, bottom + 14, fmt(v), `text-anchor="middle" font-size="9" fill="var(--faint)" ${mono}`));
+  }
+  for (let v = 0; v <= bedH + 1e-9; v += step) {
+    const [, y] = toCanvas(0, v);
+    parts.push(`<line x1="${left}" y1="${y}" x2="${right}" y2="${y}" stroke="var(--grid)"/>`);
+    parts.push(text(left - 8, y + 3, fmt(v), `text-anchor="end" font-size="9" fill="var(--faint)" ${mono}`));
+  }
+
+  if (calibration.homed) {
+    const [hx, hy] = toCanvas(...presets.calibration.home_bed);
+    parts.push(`<path d="M${hx - 7} ${hy}H${hx + 7}M${hx} ${hy - 7}V${hy + 7}" stroke="var(--ok)" stroke-width="2"/>`);
+    parts.push(text(hx + 9, hy + 12, "HOME", `font-size="9" font-weight="bold" fill="var(--ok)" ${mono}`));
+  }
+
+  const [gx, gy] = toCanvas(...presets.gantry_home);
+  parts.push(`<rect x="${gx - 5}" y="${gy - 5}" width="10" height="10" fill="none" stroke="var(--ink)" stroke-width="1.5" stroke-dasharray="2 2"/>`);
+  parts.push(text(gx + 8, gy - 6, "GANTRY HOME", `font-size="8" font-weight="bold" fill="var(--muted)" ${mono}`));
+
+  for (const s of presets.stations) parts.push(drawStation(s, mono));
+  parts.push(drawGantry(upper, bottom, width, mono));
+
+  if (hover) {
+    let content = `CURSOR  bed ${hover[0].toFixed(1)}, ${hover[1].toFixed(1)}`;
+    if (calibration.homed) {
+      const [rx, ry] = calibration.toRaw(hover);
+      content += `   raw ${rx.toFixed(1)}, ${ry.toFixed(1)}`;
+    }
+    parts.push(text(20, height - 12, content, `font-size="10" fill="var(--muted)" ${mono}`));
+  }
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  svg.innerHTML = parts.join("");
+}
+
+function drawStation(s, mono) {
+  const [x, y] = toCanvas(s.x, s.y);
+  let state, color, detail = "";
+  if (s.name === "shelf") {
+    color = COLORS.shelf;
+    const samples = gantryState && Array.isArray(gantryState.substrates) ? gantryState.substrates : null;
+    const slots = (gantryState && gantryState.shelf_slots) || presets.shelf_slots;
+    state = samples ? `${samples.filter((x) => x.location === "shelf").length}/${slots}` : `${slots}`;
+    detail = "slots";
+  } else if (!s.address) {
+    state = "NO PORT"; color = "var(--faint)";
+  } else {
+    const status = statuses[s.name] || { state: NOT_STARTED };
+    color = COLORS[status.state] || "var(--faint)";
+    detail = status.sample_id || "";
+    if (status.state === "busy" && typeof status.remaining === "number") detail = `${detail} ${status.remaining.toFixed(1)}s`;
+    state = problemLabel(status.state);
+  }
+  const strokeWidth = drag && drag.name === s.name ? 3 : 2;
+  const port = s.address ? `:${addressPort(s.address)}` : "";
+  const out = [
+    `<rect x="${x - HALF_W}" y="${y - HALF_H}" width="${2 * HALF_W}" height="${2 * HALF_H}" rx="2" fill="var(--card)" stroke="${color}" stroke-width="${strokeWidth}"/>`,
+    text(x, y - 16, stationLabel(s.name), 'text-anchor="middle" font-size="11" font-weight="bold" fill="var(--ink)"'),
+    text(x, y - 2, `${state} ${detail}`.trim(), `text-anchor="middle" font-size="10" font-weight="bold" fill="${color}" ${mono}`),
+    text(x, y + 11, `(${fmt(s.x)}, ${fmt(s.y)}) ${port}`.trim(), `text-anchor="middle" font-size="9" fill="var(--muted)" ${mono}`),
+  ];
+  if (calibration.homed) {
+    const [rx, ry] = calibration.toRaw([s.x, s.y]);
+    out.push(text(x, y + 24, `go raw ${rx.toFixed(1)}, ${ry.toFixed(1)}`, `text-anchor="middle" font-size="9" fill="var(--ok)" ${mono}`));
+  }
+  return out.join("");
+}
+
+function drawGantry(upper, bottom, width, mono) {
+  if (gantryRaw === null) {
+    return text(width / 2, upper - 14, `GANTRY ${gantryProblem}`, `text-anchor="middle" font-size="11" font-weight="bold" fill="var(--bad)" ${mono}`);
+  }
+  const bed = calibration.toBed(gantryRaw);
+  const [bedW, bedH] = bedSize();
+  const clamped = [Math.min(Math.max(bed[0], 0), bedW), Math.min(Math.max(bed[1], 0), bedH)];
+  const [x, y] = toCanvas(...clamped);
+  const out = [
+    `<line x1="${x}" y1="${upper}" x2="${x}" y2="${bottom}" stroke="var(--ink)" stroke-width="4"/>`,
+    `<rect x="${x - 6}" y="${upper - 6}" width="12" height="6" fill="var(--ink)"/>`,
+    `<rect x="${x - 6}" y="${bottom}" width="12" height="6" fill="var(--ink)"/>`,
+    `<rect x="${x - 13}" y="${y - 13}" width="26" height="26" fill="var(--ink)" stroke="var(--head)" stroke-width="2"/>`,
+    `<path d="M${x - 5} ${y}H${x + 5}M${x} ${y - 5}V${y + 5}" stroke="var(--head)" stroke-width="2"/>`,
+  ];
+  let label = `GANTRY ${bed[0].toFixed(1)}, ${bed[1].toFixed(1)}`;
+  if (clamped[0] !== bed[0] || clamped[1] !== bed[1]) label += "  (OFF BED)";
+  const rightSide = x < width - 200;
+  const anchor = rightSide ? "start" : "end";
+  const offset = rightSide ? 20 : -20;
+  out.push(text(x + offset, y - 4, label, `text-anchor="${anchor}" font-size="10" font-weight="bold" fill="var(--ink)" ${mono}`));
+  const transport = gantryState && gantryState.transport;
+  if (transport && transport.phase === "delivery") {
+    out.push(text(x + offset, y + 10, transport.substrate_id, `text-anchor="${anchor}" font-size="10" font-weight="bold" fill="var(--done)" ${mono}`));
+  }
+  return out.join("");
+}
+
+// --------------------------------------------------------- interaction
+
+function eventPoint(event) {
+  const box = svg.getBoundingClientRect();
+  return [event.clientX - box.left, event.clientY - box.top];
+}
+function stationAt(cx, cy) {
+  for (const s of [...presets.stations].reverse()) {
+    const [x, y] = toCanvas(s.x, s.y);
+    if (Math.abs(cx - x) <= HALF_W && Math.abs(cy - y) <= HALF_H) return s;
+  }
+  return null;
+}
+
+svg.addEventListener("pointerdown", (event) => {
+  if (!presets || event.button !== 0) return;
+  const [cx, cy] = eventPoint(event);
+  const s = stationAt(cx, cy);
+  if (!s) return;
+  const [bx, by] = toBed(cx, cy);
+  drag = { name: s.name, dx: bx - s.x, dy: by - s.y };
+  svg.setPointerCapture(event.pointerId);
+});
+svg.addEventListener("pointermove", (event) => {
+  if (!presets) return;
+  const [cx, cy] = eventPoint(event);
+  hover = toBed(cx, cy);
+  svg.style.cursor = drag || stationAt(cx, cy) ? "move" : "crosshair";
+  if (drag) {
+    const s = station(drag.name);
+    const [bedW, bedH] = bedSize();
+    s.x = Math.round(Math.min(Math.max(hover[0] - drag.dx, 0), bedW) * 10) / 10;
+    s.y = Math.round(Math.min(Math.max(hover[1] - drag.dy, 0), bedH) * 10) / 10;
+    syncRow(s.name);
+  }
+  draw();
+});
+svg.addEventListener("pointerup", () => {
+  if (drag) { drag = null; pushPresets(); draw(); }
+});
+svg.addEventListener("pointerleave", () => { if (!drag) { hover = null; draw(); } });
+svg.addEventListener("dblclick", (event) => {
+  if (!presets) return;
+  const [cx, cy] = eventPoint(event);
+  if (stationAt(cx, cy)) return;
+  const [bx, by] = toBed(cx, cy);
+  const [bedW, bedH] = bedSize();
+  if (bx < 0 || bx > bedW || by < 0 || by > bedH) return;
+  $("move-x").value = bx.toFixed(1);
+  $("move-y").value = by.toFixed(1);
+  moveGantry();
+});
+window.addEventListener("resize", draw);
+
+// ------------------------------------------------------------- moving
+
+async function moveGantry() {
+  const bed = [num($("move-x").value), num($("move-y").value)];
+  const result = $("move-result");
+  if (bed.includes(null)) {
+    result.textContent = "x and y must be numbers";
+    result.className = "mono small bad";
+    return;
+  }
+  // The gantry moves in its own (raw) coordinates; HOME/REF calibration maps bed to raw.
+  const [x, y] = calibration.toRaw(bed);
+  $("move-button").disabled = true;
+  result.textContent = `Sending move to bed (${fmt(bed[0])}, ${fmt(bed[1])})...`;
+  result.className = "mono small";
+  try {
+    const response = await fetch("/api/move", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ x, y }),
+    });
+    const reply = await response.json();
+    result.textContent = reply.ok ? `Moving to bed (${fmt(bed[0])}, ${fmt(bed[1])})` : reply.message;
+    result.className = `mono small ${reply.ok ? "good" : "bad"}`;
+  } catch {
+    result.textContent = "GUI server not running";
+    result.className = "mono small bad";
+  } finally {
+    $("move-button").disabled = false;
+  }
+}
+$("move-form").addEventListener("submit", (event) => { event.preventDefault(); moveGantry(); });
+
+// ------------------------------------------------------ sidebar edits
+
+document.querySelectorAll("input[name=source]").forEach((radio) => {
+  radio.addEventListener("change", () => { presets.gantry_source = radio.value; pushPresets(); });
+});
+$("gantry-address").addEventListener("input", (event) => {
+  presets.gantry_address = event.target.value.trim();
+  pushPresets();
+});
+for (const [id, axis] of [["bed-w", 0], ["bed-h", 1]]) {
+  $(id).addEventListener("input", (event) => {
+    const value = num(event.target.value);
+    if (value !== null && value > 0) { presets.bed[axis] = value; pushPresets(); draw(); }
+  });
+}
+
+for (const [id, axis] of [["home-pos-x", 0], ["home-pos-y", 1]]) {
+  $(id).addEventListener("input", (event) => {
+    const value = num(event.target.value);
+    if (value !== null) { presets.gantry_home[axis] = value; pushPresets(); draw(); }
+  });
+}
+$("move-time").addEventListener("input", (event) => {
+  const value = num(event.target.value);
+  if (value !== null && value > 0) { presets.move_time = value; pushPresets(); }
+});
+$("shelf-slots").addEventListener("input", (event) => {
+  const value = num(event.target.value);
+  if (value !== null && Number.isInteger(value) && value >= 1 && value <= 30) {
+    presets.shelf_slots = value; pushPresets(); showRouteCount(); draw();
+  }
+});
+function showRouteCount() {
+  const count = presets.routes.length;
+  const over = count > presets.shelf_slots;
+  $("routes-count").textContent = `${count} sample${count === 1 ? "" : "s"} / ${presets.shelf_slots} shelf slots${over ? " (too many)" : ""}`;
+  $("routes-count").className = `mono small ${over ? "bad" : ""}`;
+}
+$("routes").addEventListener("input", (event) => {
+  presets.routes = event.target.value.split("\n").map((line) => line.trim()).filter(Boolean);
+  showRouteCount();
+  if (presets.routes.length <= presets.shelf_slots) pushPresets();
+});
+
+$("stations").addEventListener("input", (event) => {
+  const key = event.target.dataset.key;
+  const s = station(event.target.closest("tr").dataset.name);
+  if (!key || !s) return;
+  if (key === "address") {
+    s.address = event.target.value.trim();
+  } else {
+    const value = num(event.target.value);
+    if (value === null) return;
+    s[key] = value;
+  }
+  pushPresets();
+  draw();
+});
+$("stations").addEventListener("click", (event) => {
+  if (!event.target.classList.contains("remove")) return;
+  const name = event.target.closest("tr").dataset.name;
+  presets.stations = presets.stations.filter((s) => s.name !== name);
+  renderStationRows();
+  suggestName();
+  pushPresets();
+  draw();
+});
+$("add-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  const name = $("new-name").value.trim();
+  if (!name) return setError("Enter a name for the new experiment.");
+  if (station(name)) return setError(`${name} already exists.`);
+  const [bedW, bedH] = bedSize();
+  presets.stations.push({ name, address: "", x: Math.round(bedW * 5) / 10, y: Math.round(bedH * 5) / 10 });
+  setError("");
+  renderStationRows();
+  suggestName();
+  pushPresets();
+  draw();
+});
+
+function enteredPoint(xId, yId) {
+  const point = [num($(xId).value), num($(yId).value)];
+  if (point.includes(null)) throw new Error("Bed coordinates must be numbers.");
+  return point;
+}
+$("set-home").addEventListener("click", () => {
+  try {
+    if (!gantryRaw) throw new Error("No live gantry position to home against.");
+    calibration.setHome([...gantryRaw], enteredPoint("home-x", "home-y"));
+    setError("");
+    pushPresets();
+  } catch (error) { setError(error.message); }
+});
+$("set-ref").addEventListener("click", () => {
+  try {
+    if (!gantryRaw) throw new Error("No live gantry position to calibrate against.");
+    calibration.setReference([...gantryRaw], enteredPoint("ref-x", "ref-y"));
+    setError("");
+    pushPresets();
+  } catch (error) { setError(error.message); }
+});
+$("clear-calibration").addEventListener("click", () => { calibration.clear(); setError(""); pushPresets(); });
+
+// --------------------------------------------------------------- start
+
+loadPresets().then(poll).catch(() => {
+  $("live").textContent = "GUI SERVER DOWN";
+  setError("Could not load the presets. Is python main.py running?");
+});
+</script>
+</body>
+</html>

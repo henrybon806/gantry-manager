@@ -1,18 +1,21 @@
-# Gantry Lab Simulator
+# Gantry Manager
 
-A deterministic gantry scheduling simulation for a small lab workflow, built to model one gantry moving samples between experiment stations while enforcing realistic constraints:
+Schedules one gantry moving samples between lab experiment stations. It drives
+real instruments over HTTP, and ships fake nodes (`sim/`) so the whole setup
+runs on one computer with no hardware. It enforces these constraints:
 
 - only one gantry can move at a time
 - a station cannot be re-used while it is still busy
 - a substrate cannot be picked up again immediately after finishing a step if the gantry is still in motion
-- each experiment is backed by its own live TCP status server
+- each experiment is backed by its own live HTTP status server (labnode)
 - every sample carries route metadata and workflow state in a dedicated `Substrate` model
 
-This is not just a visual toy. The simulation is grounded in a real event scheduler and actual localhost experiment endpoints.
+Related repos (clone them next to this one):
 
-## Screenshots
+- [labnode](https://github.com/henrybon806/labnode): the small HTTP API every experiment node speaks
+- [lab-devices](https://github.com/henrybon806/lab-devices): the real hardware nodes (instruments, and later the gantry)
 
-### Configuration view
+## Configuration view
 
 The initial view shows the experiment floor, separate shelf-access station, shelf inventory, route editor, experiment settings, and controls.
 
@@ -32,7 +35,7 @@ The system models a lab floor with:
 - three experiment stations: A, B, and C
 - a shelf for queued and completed samples
 - per-sample route ordering and progress tracking
-- live status from each experiment over TCP
+- live status from each experiment over HTTP
 
 The scheduler advances by event time instead of real wall-clock sleep, which keeps the behavior deterministic and easy to reason about while still reflecting the lab's real timing constraints.
 
@@ -57,32 +60,55 @@ Each sample is represented by a `Substrate` object with:
 This keeps route logic and sample identity separated from the transport state.
 
 ### Separate live experiment endpoints
-Each experiment client runs its own thread and exposes JSON status over a real TCP socket. The GUI and scheduler both read from the same live endpoint model rather than faking values in memory.
+Each experiment is its own process exposing labnode JSON status over HTTP. The GUI and scheduler both read from those live endpoints rather than faking values in memory.
 
 ## Project structure
 
-- `gantry.py` — core scheduler, gantry logic, experiment clients, and TCP server implementation
-- `substrates.py` — dedicated `Substrate` model and workflow state
-- `gantry_gui.py` — Tkinter visualizer and simulation controls
-- `test_unittests.py` — deterministic behavior and validation tests
-- `timer.py` and `timerClient.py` — legacy timer prototype retained for reference
+```text
+gantry/            the gantry
+  scheduler.py       scheduling core: GantryManager, in-memory and remote experiment clients
+  substrates.py      Substrate model and workflow state
+  server.py          scheduler thread + gantry API (/pos, /state); python -m gantry runs it without the GUI
+web/               the GUI, a local website (python -m web runs it alone)
+  server.py          serves the page, polls nodes for it, forwards moves, saves presets
+  static/index.html  the page
+helpers/           shared code
+  polling.py         reading labnode nodes; NOT STARTED / UNABLE TO READ
+  calibration.py     HOME/REF calibration between gantry and bed coordinates
+  presets.py         loading, checking and saving presets.json
+sim/               fake hardware for running without a lab, one terminal each
+  experiment_a.py …  fake experiment nodes with a fixed name, port and duration
+  node.py            generic fake node (letter, port, duration as arguments)
+  fake_gantry.py     fake gantry with a draggable dot, for the GUI's Lab (HTTP) mode
+tests/             unit and end-to-end tests
+legacy/            the old Tkinter GUI and the timer prototype, kept for reference
+data/              your settings
+  presets.json       written by the GUI's Save presets, read by the gantry and the GUI
+  gantry_layout.json older settings file, imported once if presets.json is missing
+assets/            screenshots
+main.py            the normal way to run: scheduler + gantry API + GUI in one process
+requirements.txt   labnode, pinned to a release tag
+```
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-	GUI[Tkinter GUI] --> Manager[GantryManager]
-	Manager --> Gantry[Single virtual gantry]
-	Manager --> Queue[Substrate queue]
-	Manager --> A[Experiment A server thread]
-	Manager --> B[Experiment B server thread]
-	Manager --> C[Experiment C server thread]
-	A --> PortA[localhost port]
-	B --> PortB[localhost port]
-	C --> PortC[localhost port]
+	Browser[browser :8080] --> GUI
+	GUI[GUI :8080] -. GET /state .-> Gantry[scheduler + gantry API :8100]
+	GUI -. GET /status .-> A
+	GUI -. GET /status .-> B
+	GUI -. GET /status .-> C
+	Gantry -- start / taken / status --> A[experiment A :8001]
+	Gantry -- start / taken / status --> B[experiment B :8002]
+	Gantry -- start / taken / status --> C[experiment C :8003]
 ```
 
-The GUI is an observer and control surface. The manager owns scheduling and transport state, while each experiment server owns the status endpoint for its client.
+`python main.py` runs the GUI and the scheduler (with its gantry API) in one
+process on the computer attached to the gantry; each experiment node is its own
+process, usually on its instrument's computer. The GUI is an observer that can
+only move the gantry; the scheduler owns scheduling and transport state; each
+node owns its experiment.
 
 ## Scheduling model
 
@@ -90,118 +116,232 @@ The GUI is an observer and control surface. The manager owns scheduling and tran
 2. The gantry travels to the floor-level shelf-access station.
 3. It picks up one substrate and delivers it to the next experiment in that substrate's route.
 4. The experiment client processes the substrate for its configured duration.
-5. The manager polls the client's TCP endpoint. A finished substrate joins the pickup queue.
+5. The manager polls the client's HTTP /status endpoint. A finished substrate joins the pickup queue.
 6. The gantry returns the substrate to its next experiment or to the shelf when its route is complete.
 7. If a destination is occupied, the substrate waits or is staged on the shelf; it is never placed into a busy client.
 8. Every gantry leg uses the same fixed movement time, independent of visual distance.
 
-## Run the simulator
+## Run it
 
-From the project folder:
+Every piece is its own process. Install once:
 
 ```bash
-python3 gantry_gui.py
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
 ```
 
-This opens the GUI with:
+labnode lives in its own repo, [henrybon806/labnode](https://github.com/henrybon806/labnode),
+pinned to a tag in `requirements.txt`. To work on it alongside the gantry, clone
+it next to this repo and install from there with `.venv/bin/pip install "../labnode[test]"`.
+Use a regular install rather than `pip install -e`: on this Mac the `.venv`
+folder carries the macOS "hidden" flag, and Python 3.13 skips the hidden
+`.pth` file an editable install relies on. Reinstall after changing labnode.
 
-- experiment floor view
-- gantry position and movement
-- shelf inventory area
-- queue and status panels
-- editable sample routes and experiment settings
+Then open one terminal per process, in any order:
+
+```bash
+.venv/bin/python sim/experiment_a.py     # terminal 1
+.venv/bin/python sim/experiment_b.py     # terminal 2
+.venv/bin/python sim/experiment_c.py     # terminal 3
+.venv/bin/python main.py                 # terminal 4: scheduler + GUI, then open http://127.0.0.1:8080
+```
+
+`main.py --no-gui` (or `python -m gantry`) runs the scheduler and gantry API
+without the GUI; `python -m web` runs only the GUI, to watch a gantry running
+elsewhere. `--gui-port` moves the GUI off 8080.
+
+`main.py` takes its settings from `data/presets.json` (see **Presets**
+below). Any flag overrides its preset, e.g.:
+
+```bash
+.venv/bin/python main.py --port 8100 --home 0,0 --shelf 10,30 --slots 10 \
+    --node A=8001@35,45 --node B=8002@60,15 --node C=8003@85,40 \
+    --route A,B,C --route C,A --route B,C --move-time 1
+```
+
+Each experiment file in `sim/` has a fixed name, port and duration (A :8001 3 s,
+B :8002 4 s, C :8003 2.5 s). For a different port or duration without editing
+a file, use the generic node instead:
+
+```bash
+.venv/bin/python sim/node.py A --port 8001 --duration 3
+```
+
+Real instruments live in [lab-devices](https://github.com/henrybon806/lab-devices);
+start a new one from its `_template/`. To point the gantry at real nodes, put their
+addresses in `data/presets.json` (or pass `--node`).
+
+To try the GUI's *Lab (HTTP)* mode without a real gantry, run the fake one
+with `python -m web` instead of `main.py` (it also uses port 8100):
+
+```bash
+.venv/bin/python sim/fake_gantry.py
+.venv/bin/python -m web
+```
+
+`main.py` with no arguments uses exactly those nodes and routes. It
+drives the nodes over HTTP (`POST /start`, `POST /taken`) on wall-clock time
+and serves `GET /state` for the GUI.
+
+`@x,y` is where each station sits on the bed. The gantry has its own `--home`
+spot, separate from the shelf: it starts there and travels to the shelf like
+any other location. Ask it where it is at any time:
+
+```bash
+curl http://127.0.0.1:8100/pos
+# {"x": 21.2, "y": 36.7, "z": 0.0, "moving": true, "at": null}
+```
+
+Move it while it is stopped (this takes the normal move time; it answers 409
+while the gantry is moving, and needs `Authorization: Bearer $LABNODE_TOKEN`
+when a token is set):
+
+```bash
+curl -X POST http://127.0.0.1:8100/pos -H 'content-type: application/json' -d '{"x": 40, "y": 20}'
+```
+
+The scheduler waits for the move, then carries on from that spot. In the GUI,
+the **MOVE GANTRY** box (or a double-click on the bed) sends the same request.
+
+`at` names the location when the gantry is stopped (`home`, `shelf`,
+`experiment_a`, ...). `GET /position` returns the same thing, so the
+GUI's *Lab (HTTP)* mode can point at the gantry. A node that is not running counts as busy,
+so the gantry never delivers to it; samples wait on the shelf until it is up.
+
+The GUI only sends one command, the gantry move; everything else is read. Type
+the gantry address under **GANTRY SOURCE** and each node's address in the
+**EXPERIMENTS** list (defaults match the commands above). Anything it cannot
+read is labelled:
+
+- **NOT STARTED**: nothing answers at that address
+- **UNABLE TO READ**: something answered, but not with a valid status or state
+
+The reason (for example `Connection refused`) is shown under the gantry source.
 
 ## Run the tests
 
 ```bash
-python3 -m unittest discover -v
+.venv/bin/python -m unittest discover -v
 ```
 
 This project is validated against a small deterministic suite covering:
 
 - substrate queue insertion while work is running
-- TCP experiment server status handling
+- HTTP experiment status handling and the visualization poller
 - route parsing and validation
 - three random experiment runs preserving order and occupancy rules
 
-## GUI controls
+## Experiment nodes (labnode)
 
-The route editor accepts one substrate route per line using `A`, `B`, and `C`:
-
-```text
-A,B,C
-C,A
-B,C
-```
-
-The count must match the number of non-empty route lines. The simulator supports up to 30 substrates. The **Queue** control adds a new substrate to the live run without resetting active work.
-
-Experiment duration and floor-position fields are editable before applying a setup. The shelf inventory has its own scrollbar and can be scrolled with the scrollbar, mouse wheel, or trackpad.
-
-Substrate cards use colored route markers:
-
-- green means the experiment step is complete
-- red means the step is still pending
-
-Station status rows show the sample ID, elapsed time, remaining time, duration, and the TCP port being polled.
-
-## TCP experiment servers
-
-The manager starts three independent daemon server threads, one for each experiment. Each binds a dynamic localhost port and responds to:
+Every experiment, real or simulated, is a [labnode](https://github.com/henrybon806/labnode)
+HTTP node. A real instrument computer runs a small `Experiment` subclass that
+implements `run()` (and optionally `stop()`), which gives it:
 
 ```text
-STATUS <simulation_time>
+GET  /status     idle | busy | stopping | done | stopped | error, plus sample and timing
+POST /start      {"sample_id": ..., "params": {...}}
+POST /stop       emergency stop
+POST /taken      sample removed, back to idle
+GET  /position   gantry node only
 ```
 
-For example:
+`sim/node.py` is a simulated node of this kind; nothing starts it for you.
 
 ```bash
-printf 'STATUS 11.8\n' | nc 127.0.0.1 49461
+curl http://127.0.0.1:8001/status
+curl http://127.0.0.1:8100/state
 ```
 
-The JSON response includes the experiment name, state, sample ID, elapsed time, remaining time, port, and server thread name. Ports are intentionally dynamic and are shown live in the GUI.
+## GUI
 
-## Example workflow
+`python main.py` serves the GUI as a local website on http://127.0.0.1:8080
+(`--port` to change it). It listens on loopback only, since the page can move
+the gantry. The server polls the nodes and the gantry for the page (browsers
+cannot read the nodes directly) and forwards moves to the gantry.
 
-The simulator starts with a default queue of samples and routes, then lets you:
+The page is a top-down view of the bed showing the live gantry position and
+each experiment's state. It has no run controls: samples and routes are set on
+the gantry's command line (`--route A,B,C`, one per sample) and durations on
+each node. Restart `main.py` to run a new batch.
 
-1. change the route list
-2. set per-experiment durations and positions
-3. enqueue additional samples dynamically
-4. start the run and watch the gantry move through the floor
-5. inspect queue, status, and completed sample flow in real time
+- **Gantry source**: *Simulator* reads `GET /state` from the scheduler and
+  places the gantry between the stations it is moving between. *Lab (HTTP)* polls
+  `GET /position` (`{"x": .., "y": ..}`) on the gantry node.
+- **Move gantry**: type bed x, y and press *Move gantry*, or double-click an
+  empty spot on the bed. It sends `POST /pos` (through the HOME/REF calibration
+  if set) and shows the reply, e.g. *Refused: gantry is busy moving*.
+- **Experiments**: set each node address (`http://host:port`, `host:port` or a
+  port), drag boxes to place them, and add or remove experiments.
+- **Homing**: jog the gantry to a known spot and press *Set HOME here*, which
+  sets the offset. Then move to a second spot and press *Set REF here*, which
+  sets the scale. Each box then shows the raw coordinate to drive to.
+- **Bed & shelf**, **Samples**: bed size, number of shelf slots, and one sample
+  route per line. The shelf box shows slots in use (e.g. `2/5`) while the
+  gantry runs.
+- Edits apply straight away (every open tab sees them) but are only written
+  to disk when you press **Save presets**. *Reload* throws away unsaved edits.
 
-## Why this design works well
+The server's API, if you want to script it:
 
-The simulation balances realism and readability:
-
-- transport decisions are deterministic and inspectable
-- each sample owns its own route and completion metadata
-- multiple clients operate independently in their own threads
-- the GUI clearly separates shelf storage from active experiment stations
-- the logic remains easy to extend for more stations, larger sample queues, or added lab constraints
-
-## Verification
-
-The project was verified with actual live socket checks, and the unit suite passes.
-
-The current validation command and result:
-
-```bash
-python3 -m unittest discover -v
+```text
+GET  /api/presets    PUT /api/presets    POST /api/presets/save    POST /api/presets/reload
+GET  /api/snapshot   POST /api/move {"x", "y"}
 ```
 
-This passed successfully with the project’s test suite covering the key gantry rules.
+The older Tkinter window (`python -m legacy.gantry_gui`) still works but keeps its
+own `data/gantry_layout.json`.
+
+## Presets
+
+`data/presets.json` holds everything you would otherwise re-enter each run. Edit
+it in the web GUI and press **Save presets**; `main.py` (and
+`python -m gantry`, `python -m web`) read it at startup (`--presets` to use another file).
+
+```json
+{
+  "bed": [100.0, 60.0],
+  "gantry_source": "simulator",
+  "gantry_address": "127.0.0.1:8100",
+  "gantry_home": [0.0, 0.0],
+  "move_time": 1.0,
+  "shelf_slots": 10,
+  "calibration": {"home_raw": null, "home_bed": [0.0, 0.0], "scale": [1.0, 1.0]},
+  "stations": [
+    {"name": "shelf", "address": "", "x": 10.0, "y": 30.0},
+    {"name": "experiment_a", "address": "127.0.0.1:8001", "x": 35.0, "y": 45.0}
+  ],
+  "routes": ["A,B,C", "C,A", "B,C"]
+}
+```
+
+- Positions are bed coordinates, as the GUI shows them. The scheduler
+  converts them to gantry coordinates through the saved calibration.
+- The gantry listens on the port in `gantry_address`.
+- Stations without a node address are drawn but not used by the gantry.
+- Route entries are letters (`A` → `experiment_a`) or station names.
+- The number of routes cannot exceed `shelf_slots` (at most 30).
+- If there is no `data/presets.json` yet, the first run starts from an existing
+  `data/gantry_layout.json`, so nothing you set up before is lost.
+- Experiment durations are not presets: each experiment decides its own run
+  time (see `sim/`).
 
 ## Troubleshooting
 
 ### The terminal stays busy
 
-That is expected while the Tkinter window is open. `python3 gantry_gui.py` is a foreground desktop application. Close the window to stop the GUI and its server threads cleanly.
+That is expected: `python main.py` and each experiment are servers that run until you press Ctrl+C in their terminal. Closing the browser tab does not stop anything.
 
-### TCP ports change between runs
+### The page says GUI SERVER DOWN
 
-That is expected. Each experiment server binds an available ephemeral localhost port to avoid collisions with other processes.
+`python main.py` is not running (or is on another port). Start it and the page reconnects by itself.
+
+### Everything says NOT STARTED
+
+Nothing is listening at those addresses. Start the experiments and `main.py` in their own terminals and check the ports match the addresses in the GUI.
+
+### A node stays DONE after restarting the gantry
+
+A node keeps its sample until something calls `POST /taken`. If the gantry restarts mid-run it no longer knows that sample, so restart that node too.
 
 ### Tkinter is unavailable
 
@@ -222,7 +362,3 @@ screencapture -x -l <window-id> assets/gantry-lab-current.png
 ```
 
 The window ID can be obtained with a macOS window-inspection tool.
-
-## Notes
-
-This repository is ideal for exploring how a single constrained automation resource behaves under queue pressure, blocked pickups, and multi-step sample workflows without introducing unrealistic overlaps or invalid state transitions.

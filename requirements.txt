@@ -1,0 +1,4 @@
+# labnode lives in its own repo: https://github.com/henrybon806/labnode
+# Working on labnode locally? Install from a sibling clone instead:
+#   .venv/bin/pip install "../labnode[test]"
+labnode[test] @ git+https://github.com/henrybon806/labnode.git@labnode-v0.2.0

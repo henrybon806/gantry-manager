@@ -1,15 +1,48 @@
-"""Deterministic simulation of a single gantry serving experiment clients."""
+"""Scheduler for a single gantry serving experiment clients.
+
+Clients are either in-memory ``ExperimentClient`` objects (tests, event-jumping
+simulation) or ``RemoteExperiment`` handles for labnode processes that were
+started separately, e.g. from ``sim/`` or lab-devices.
+"""
 
 from __future__ import annotations
 
-import json
-import socket
-import socketserver
-import threading
+import math
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
-from substrates import Substrate
+from labnode import NodeClient, NodeError, NodeUnreachable
+from gantry.substrates import Substrate
+
+
+# Node states that mean the sample has stopped and is waiting for pickup.
+COLLECTABLE_STATES = {"done", "stopped", "error"}
+NOT_STARTED = "not started"
+UNREADABLE = "unreadable"
+# The gantry's own resting spot. It is not a station: nothing is picked up there.
+HOME = "home"
+# Position name after a manual move: parked at a free point, not a location.
+MANUAL = "manual"
+
+Point = tuple[float, float]
+
+
+def parse_route(text: str, known: set[str]) -> tuple[str, ...]:
+    """Turn ``"A,B,C"`` into ``("experiment_a", "experiment_b", "experiment_c")``.
+
+    A token that is already a station name (e.g. ``keyence``) is used as is.
+    """
+    route = tuple(
+        token.strip() if token.strip() in known else f"experiment_{token.strip().lower()}"
+        for token in text.split(",")
+        if token.strip()
+    )
+    if not route:
+        raise ValueError("Routes need at least one experiment.")
+    unknown = [name for name in route if name not in known]
+    if unknown:
+        raise ValueError(f"Unknown experiments in route {text!r}: {', '.join(unknown)}")
+    return route
 
 
 @dataclass
@@ -37,6 +70,11 @@ class ExperimentClient:
         self.started_at = now
         self.finishes_at = now + self.duration
 
+    def poll(self, now: float) -> str:
+        if self.substrate is None:
+            return "idle"
+        return "done" if self.is_finished(now) else "busy"
+
     def is_finished(self, now: float) -> bool:
         return self.busy and self.finishes_at is not None and now >= self.finishes_at
 
@@ -50,99 +88,66 @@ class ExperimentClient:
         return substrate
 
 
-class ExperimentServer:
-    """TCP status server for one simulated experiment client."""
+class RemoteExperiment:
+    """An experiment running as its own labnode process, driven over HTTP.
 
-    def __init__(self, client: ExperimentClient, host: str = "127.0.0.1") -> None:
-        self.client = client
-        self.host = host
-        self.port: Optional[int] = None
-        self._server: Optional[_ExperimentTCPServer] = None
-        self._thread: Optional[threading.Thread] = None
-        self.start()
+    The node is never started from here: if nothing answers at ``address`` the
+    client reports ``not started`` and counts as busy so no sample is sent to it.
+    """
+
+    def __init__(self, name: str, address: str, token: Optional[str] = None, timeout: float = 1.0) -> None:
+        self.name = name
+        self.node = NodeClient(address, token=token, timeout=timeout)
+        self.url = self.node.url
+        self.substrate: Optional[Substrate] = None
+        self.status: dict[str, Any] = {"state": NOT_STARTED}
 
     @property
-    def thread_name(self) -> Optional[str]:
-        return self._thread.name if self._thread else None
+    def busy(self) -> bool:
+        return self.substrate is not None or self.status.get("occupied", True)
 
-    @property
-    def thread_alive(self) -> bool:
-        return self._thread is not None and self._thread.is_alive()
+    def poll(self, now: float) -> str:
+        try:
+            status = self.node.status()
+            if not isinstance(status, dict) or not isinstance(status.get("state"), str):
+                raise ValueError("response is not a labnode status")
+            self.status = status
+        except NodeUnreachable as error:
+            self.status = {"state": NOT_STARTED, "error": str(error)}
+        except (NodeError, ValueError) as error:
+            self.status = {"state": UNREADABLE, "error": str(error)}
+        state = self.status["state"]
+        if self.substrate is not None and state in COLLECTABLE_STATES:
+            return "done"
+        return state
 
-    def start(self) -> None:
-        if self._server is not None:
-            return
-        self._server = _ExperimentTCPServer((self.host, 0), _ExperimentRequestHandler, self)
-        self.port = int(self._server.server_address[1])
-        self._thread = threading.Thread(
-            target=self._server.serve_forever,
-            name=f"{self.client.name}-server",
-            daemon=True,
-        )
-        self._thread.start()
+    def start(self, substrate: Substrate, now: float) -> None:
+        try:
+            self.status = self.node.start(substrate.substrate_id)
+        except (NodeError, NodeUnreachable, ValueError) as error:
+            raise RuntimeError(f"{self.name} did not start {substrate.substrate_id}: {error}") from None
+        self.substrate = substrate
 
-    def close(self) -> None:
-        server, thread = self._server, self._thread
-        self._server = None
-        self._thread = None
-        self.port = None
-        if server is not None:
-            server.shutdown()
-            server.server_close()
-        if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=1.0)
-
-    def read_status(self, now: float) -> dict[str, Any]:
-        if self.port is None:
-            raise RuntimeError(f"{self.client.name} server is not running")
-        with socket.create_connection((self.host, self.port), timeout=0.5) as connection:
-            connection.sendall(f"STATUS {now}\n".encode("ascii"))
-            response = connection.recv(4096).decode("utf-8")
-        return json.loads(response)
-
-    def _status_payload(self, now: float) -> dict[str, Any]:
-        substrate = self.client.substrate
-        if substrate is None:
-            state = "idle"
-            remaining = 0.0
-        elif self.client.is_finished(now):
-            state = "finished"
-            remaining = 0.0
-        else:
-            state = "busy"
-            remaining = max(0.0, (self.client.finishes_at or now) - now)
-        elapsed = 0.0
-        if self.client.started_at is not None:
-            elapsed = min(self.client.duration, max(0.0, now - self.client.started_at))
-        return {
-            "name": self.client.name,
-            "state": state,
-            "substrate_id": substrate.substrate_id if substrate else None,
-            "remaining": remaining,
-            "elapsed": elapsed,
-            "duration": self.client.duration,
-            "port": self.port,
-            "thread": self.thread_name,
-        }
+    def release(self, now: float) -> Substrate:
+        if self.substrate is None:
+            raise RuntimeError(f"client {self.name} has no sample to release")
+        try:
+            self.status = self.node.taken(self.substrate.substrate_id)
+        except (NodeError, NodeUnreachable, ValueError) as error:
+            raise RuntimeError(f"{self.name} did not release {self.substrate.substrate_id}: {error}") from None
+        substrate = self.substrate
+        self.substrate = None
+        return substrate
 
 
-class _ExperimentRequestHandler(socketserver.StreamRequestHandler):
-    def handle(self) -> None:
-        command = self.rfile.readline().decode("ascii", errors="ignore").strip().split()
-        if len(command) == 2 and command[0].upper() == "STATUS":
-            payload = self.server.experiment_server._status_payload(float(command[1]))
-            self.wfile.write((json.dumps(payload) + "\n").encode("utf-8"))
-        else:
-            self.wfile.write(b'{"error": "expected STATUS <time>"}\n')
+Client = Union[ExperimentClient, RemoteExperiment]
 
 
-class _ExperimentTCPServer(socketserver.ThreadingTCPServer):
-    allow_reuse_address = True
-    daemon_threads = True
-
-    def __init__(self, address: tuple[str, int], handler: type[socketserver.BaseRequestHandler], experiment_server: ExperimentServer) -> None:
-        super().__init__(address, handler)
-        self.experiment_server = experiment_server
+@dataclass
+class _ManualMove:
+    start: Point
+    end: Point
+    arrives_at: float
 
 
 @dataclass
@@ -159,19 +164,36 @@ class GantryManager:
 
     def __init__(
         self,
-        clients: list[ExperimentClient],
+        clients: list[Client],
         substrates: list[Substrate],
         movement_time: float = 1.0,
+        locations: Optional[dict[str, Point]] = None,
+        shelf_slots: Optional[int] = None,
     ) -> None:
+        """``locations`` maps "home", "shelf" and each client name to bed (x, y).
+
+        ``shelf_slots`` caps how many samples the shelf holds (each keeps its slot
+        while it is out at an experiment); None means only the 30-sample limit.
+        """
         if movement_time <= 0:
             raise ValueError("movement_time must be positive")
         self.clients = {client.name: client for client in clients}
         if len(self.clients) != len(clients):
             raise ValueError("client names must be unique")
+        if shelf_slots is not None and len(substrates) > shelf_slots:
+            raise ValueError(f"{len(substrates)} samples but the shelf has {shelf_slots} slots")
         self.substrates = substrates
+        self.shelf_slots = shelf_slots
         self.movement_time = movement_time
         self.now = 0.0
-        self.position = "shelf"
+        self.position = HOME
+        self._manual_point: Optional[Point] = None
+        self._manual_move: Optional[_ManualMove] = None
+        self.locations = dict(locations or {})
+        if self.locations:
+            missing = [name for name in (HOME, "shelf", *self.clients) if name not in self.locations]
+            if missing:
+                raise ValueError(f"no location for: {', '.join(missing)}")
         self._transport: Optional[_Transport] = None
         self._waiting: dict[str, tuple[Substrate, str]] = {}
         self.events: list[tuple[float, str, str]] = []
@@ -180,17 +202,10 @@ class GantryManager:
             for experiment_name in substrate.experiment_order:
                 if experiment_name not in self.clients:
                     raise ValueError(f"unknown experiment client: {experiment_name}")
-        self.servers = {
-            client.name: ExperimentServer(client) for client in clients
-        }
-
-    def close(self) -> None:
-        for server in self.servers.values():
-            server.close()
 
     @property
     def gantry_busy(self) -> bool:
-        return self._transport is not None
+        return self._transport is not None or self._manual_move is not None
 
     @property
     def completed(self) -> bool:
@@ -233,10 +248,108 @@ class GantryManager:
             })
         return queue
 
+    def coordinates(self) -> Optional[Point]:
+        """Where the gantry head is right now, or None without ``locations``."""
+        if not self.locations:
+            return None
+        transport = self._transport
+        if self._manual_move is not None:
+            start, end = self._manual_move.start, self._manual_move.end
+            started_at = self._manual_move.arrives_at - self.movement_time
+        elif transport is None:
+            return self._point_of(self.position)
+        else:
+            if transport.phase == "pickup":
+                start, end = self._point_of(self.position), self.locations[transport.source]
+            else:
+                start, end = self.locations[transport.source], self.locations[transport.destination]
+            started_at = transport.arrives_at - self.movement_time
+        progress = min(1.0, max(0.0, (self.now - started_at) / self.movement_time))
+        return (
+            start[0] + (end[0] - start[0]) * progress,
+            start[1] + (end[1] - start[1]) * progress,
+        )
+
+    def pos(self) -> dict[str, Any]:
+        """Payload for the gantry's GET /pos."""
+        point = self.coordinates()
+        if point is None:
+            raise ValueError("gantry has no locations configured")
+        moving = self.gantry_busy
+        return {
+            "x": point[0],
+            "y": point[1],
+            "z": 0.0,
+            "moving": moving,
+            "at": None if moving or self.position == MANUAL else self.position,
+        }
+
+    def move_to(self, point: Point) -> None:
+        """Send the idle gantry to ``point``; it takes ``movement_time`` like any leg.
+
+        Refused while it is moving so a sample is never abandoned mid-delivery.
+        The scheduler waits for the move, then carries on from the new spot.
+        """
+        if not self.locations:
+            raise ValueError("gantry has no locations configured")
+        if not all(math.isfinite(value) for value in point):
+            raise ValueError("x and y must be finite numbers")
+        if self.gantry_busy:
+            raise RuntimeError("gantry is busy moving; try again when it stops")
+        start = self.coordinates()
+        assert start is not None
+        self._manual_move = _ManualMove(start, (float(point[0]), float(point[1])), self.now + self.movement_time)
+        self.events.append((self.now, "gantry_manual_move", f"({point[0]:g}, {point[1]:g})"))
+
+    def _point_of(self, position: str) -> Point:
+        if position == MANUAL:
+            assert self._manual_point is not None
+            return self._manual_point
+        return self.locations[position]
+
+    def snapshot(self, event_limit: int = 200) -> dict[str, Any]:
+        """JSON-ready view of the whole scheduler, served by the gantry node."""
+        return {
+            "now": self.now,
+            "completed": self.completed,
+            "position": self.position,
+            "movement_time": self.movement_time,
+            "shelf_slots": self.shelf_slots,
+            "transport": self.transport_snapshot,
+            "manual_move": None if self._manual_move is None else {
+                "to": list(self._manual_move.end),
+                "arrives_at": self._manual_move.arrives_at,
+            },
+            "coordinates": self.coordinates(),
+            "locations": self.locations,
+            "clients": {
+                name: {
+                    "url": getattr(client, "url", None),
+                    "sample_id": client.substrate.substrate_id if client.substrate else None,
+                }
+                for name, client in self.clients.items()
+            },
+            "substrates": [
+                {
+                    "substrate_id": substrate.substrate_id,
+                    "experiment_order": list(substrate.experiment_order),
+                    "current_experiment_index": substrate.current_experiment_index,
+                    "location": substrate.location,
+                    "completed": substrate.completed,
+                }
+                for substrate in self.substrates
+            ],
+            "queue": self.queue_snapshot,
+            "event_count": len(self.events),
+            "events": [list(event) for event in self.events[-event_limit:]],
+        }
+
     def add_substrate(self, substrate: Substrate) -> None:
         """Add a new substrate to the shelf queue without stopping active work."""
         if len(self.substrates) >= 30:
             raise ValueError("The simulator supports at most 30 substrates.")
+        if self.shelf_slots is not None and len(self.substrates) >= self.shelf_slots:
+            raise ValueError(f"The shelf is full ({self.shelf_slots} slots).")
         if any(existing.substrate_id == substrate.substrate_id for existing in self.substrates):
             raise ValueError(f"duplicate substrate id: {substrate.substrate_id}")
         for experiment_name in substrate.experiment_order:
@@ -245,7 +358,7 @@ class GantryManager:
         self.substrates.append(substrate)
         route = ",".join(substrate.experiment_order)
         self.events.append((self.now, "substrate_added", f"{substrate.substrate_id}:{route}"))
-        if self._transport is None:
+        if not self.gantry_busy:
             self._schedule_next_transport()
 
     def tick(self, now: float) -> None:
@@ -254,9 +367,14 @@ class GantryManager:
             raise ValueError("simulation time cannot move backwards")
         self.now = now
         self._collect_finished_clients()
+        if self._manual_move is not None and now >= self._manual_move.arrives_at:
+            self._manual_point = self._manual_move.end
+            self._manual_move = None
+            self.position = MANUAL
+            self.events.append((self.now, "gantry_manual_arrived", f"({self._manual_point[0]:g}, {self._manual_point[1]:g})"))
         if self._transport is not None and now >= self._transport.arrives_at:
             self._finish_transport()
-        if self._transport is None:
+        if not self.gantry_busy:
             self._schedule_next_transport()
 
     def run_until_complete(self) -> None:
@@ -266,24 +384,24 @@ class GantryManager:
             event_times = []
             if self._transport is not None:
                 event_times.append(self._transport.arrives_at)
+            if self._manual_move is not None:
+                event_times.append(self._manual_move.arrives_at)
             event_times.extend(
                 client.finishes_at
                 for client in self.clients.values()
-                if client.finishes_at is not None
+                if getattr(client, "finishes_at", None) is not None
             )
             if not event_times:
                 raise RuntimeError("simulation is deadlocked")
             self.tick(min(event_time for event_time in event_times if event_time > self.now))
 
     def _collect_finished_clients(self) -> None:
-        for server in self.servers.values():
-            status = server.read_status(self.now)
-            if status["state"] == "finished":
-                substrate = server.client.substrate
-                assert substrate is not None
+        for client in self.clients.values():
+            substrate = client.substrate
+            if client.poll(self.now) == "done" and substrate is not None:
                 if substrate.substrate_id not in self._waiting:
-                    self._waiting[substrate.substrate_id] = (substrate, server.client.name)
-                    self.events.append((self.now, "client_finished", f"{server.client.name}:{substrate.substrate_id}:{self.gantry_busy}"))
+                    self._waiting[substrate.substrate_id] = (substrate, client.name)
+                    self.events.append((self.now, "client_finished", f"{client.name}:{substrate.substrate_id}:{self.gantry_busy}"))
 
     def _schedule_next_transport(self) -> None:
         for substrate_id, (substrate, source) in self._waiting.items():
@@ -337,7 +455,13 @@ class GantryManager:
                 self._waiting.pop(transport.substrate.substrate_id, None)
             else:
                 client = self.clients[transport.source]
-                released = client.release(self.now)
+                try:
+                    released = client.release(self.now)
+                except RuntimeError as error:
+                    # Leave the sample waiting; the next tick tries the pickup again.
+                    self._transport = None
+                    self.events.append((self.now, "pickup_failed", str(error)))
+                    return
                 if released is not transport.substrate:
                     raise RuntimeError("client released the wrong substrate")
                 self._waiting.pop(transport.substrate.substrate_id, None)
@@ -358,8 +482,16 @@ class GantryManager:
                 )
         else:
             client = self.clients[transport.destination]
+            try:
+                client.start(transport.substrate, self.now)
+            except RuntimeError as error:
+                # The node would not take the sample, so carry it back to the shelf.
+                self.events.append((self.now, "delivery_failed", str(error)))
+                transport.source = transport.destination
+                transport.destination = "shelf"
+                transport.arrives_at = self.now + self.movement_time
+                return
             transport.substrate.mark_delivered(transport.destination)
-            client.start(transport.substrate, self.now)
         self.position = transport.destination
         self.events.append((self.now, "gantry_delivered", f"{transport.substrate.substrate_id}->{transport.destination}"))
         self._transport = None
