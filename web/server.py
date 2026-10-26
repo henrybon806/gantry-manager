@@ -15,12 +15,15 @@ forwards gantry moves to POST /pos.
     POST /api/presets/save     write the current settings to data/presets.json
     POST /api/presets/reload   throw away unsaved changes and re-read data/presets.json
     GET  /api/snapshot         latest station statuses and gantry reading
+    GET  /api/gantry/stream    main.py only: the gantry's position as it changes (Server-Sent Events)
     POST /api/move             {"x": .., "y": ..} in gantry coordinates -> gantry POST /pos
 """
 
 from __future__ import annotations
 
 import argparse
+import asyncio
+import json
 import os
 import threading
 from pathlib import Path
@@ -36,6 +39,10 @@ from labnode.server import TOKEN_ENV
 
 
 PAGE_PATH = Path(__file__).with_name("static") / "index.html"
+# How often the stream checks for a new gantry position, and how often it
+# sends a keep-alive when nothing changed (so closed tabs are noticed).
+STREAM_INTERVAL = 0.02
+STREAM_KEEPALIVE = 1.0
 
 
 class MoveRequest(BaseModel):
@@ -89,6 +96,11 @@ class PresetsStore:
         if payload["x"] is None:
             return statuses, (None, payload["problem"], payload["detail"])
         return statuses, (payload, "", "")
+
+    def gantry_reading(self) -> dict[str, Any]:
+        """The gantry's position as the scheduler has it right now (main.py only)."""
+        pos = self.scheduler.pos()
+        return {key: pos[key] for key in ("x", "y", "moving", "source", "problem", "detail")}
 
     def gantry_link(self) -> Optional[dict[str, Any]]:
         """What happened to the last command sent to the gantry node, under main.py."""
@@ -160,7 +172,7 @@ def move_gantry(address: str, x: float, y: float) -> dict[str, Any]:
 
 def create_app(store: PresetsStore):
     from fastapi import Body, FastAPI, HTTPException
-    from fastapi.responses import FileResponse
+    from fastapi.responses import FileResponse, StreamingResponse
 
     app = FastAPI(title="gantry web GUI")
 
@@ -211,6 +223,26 @@ def create_app(store: PresetsStore):
             "unsaved": store.unsaved,
         }
 
+    @app.get("/api/gantry/stream")
+    async def gantry_stream() -> StreamingResponse:
+        if store.scheduler is None:
+            raise HTTPException(status_code=404, detail="the gantry stream needs main.py")
+
+        async def events():
+            last, quiet = None, 0.0
+            while True:
+                reading = store.gantry_reading()
+                if reading != last:
+                    yield f"data: {json.dumps(reading)}\n\n"
+                    last, quiet = reading, 0.0
+                elif quiet >= STREAM_KEEPALIVE:
+                    yield ": keep-alive\n\n"
+                    quiet = 0.0
+                await asyncio.sleep(STREAM_INTERVAL)
+                quiet += STREAM_INTERVAL
+
+        return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control": "no-store"})
+
     @app.post("/api/move")
     def post_move(request: MoveRequest) -> dict[str, Any]:
         if store.scheduler is not None:
@@ -238,7 +270,9 @@ def serve(store: PresetsStore, port: int, app: Optional[Any] = None) -> None:
     print(f"gantry GUI on http://127.0.0.1:{port}", flush=True)
     try:
         # Loopback only: the page can move the gantry, so keep it off the network.
-        uvicorn.run(app or create_app(store), host="127.0.0.1", port=port, access_log=False)
+        # Open gantry streams never end on their own, so do not wait long for them on Ctrl+C.
+        uvicorn.run(app or create_app(store), host="127.0.0.1", port=port, access_log=False,
+                    timeout_graceful_shutdown=1)
     finally:
         store.close()
 

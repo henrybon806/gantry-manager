@@ -15,7 +15,7 @@ import math
 from dataclasses import dataclass
 from typing import Any, Optional, Union
 
-from labnode import NodeClient, NodeError, NodeUnreachable
+from labnode import NodeClient, NodeError, NodeListener, NodeUnreachable
 from gantry.substrates import Substrate
 
 
@@ -23,6 +23,8 @@ from gantry.substrates import Substrate
 COLLECTABLE_STATES = {"done", "stopped", "error"}
 NOT_STARTED = "not started"
 UNREADABLE = "unreadable"
+# How often each experiment's listener thread reads its /status.
+STATUS_POLL = 0.1
 # The gantry's own resting spot. It is not a station: nothing is picked up there.
 HOME = "home"
 # Position name after a manual move: parked at a free point, not a location.
@@ -97,6 +99,9 @@ class RemoteExperiment:
 
     The node is never started from here: if nothing answers at ``address`` the
     client reports ``not started`` and counts as busy so no sample is sent to it.
+
+    A listener thread keeps the node's latest /status, so ``poll`` never waits
+    on the network; replies to /start and /taken are stored in it right away.
     """
 
     def __init__(self, name: str, address: str, token: Optional[str] = None, timeout: float = 1.0) -> None:
@@ -105,21 +110,18 @@ class RemoteExperiment:
         self.url = self.node.url
         self.substrate: Optional[Substrate] = None
         self.status: dict[str, Any] = {"state": NOT_STARTED}
+        self.listener = NodeListener(self.url, "/status", interval=STATUS_POLL)
+
+    def close(self) -> None:
+        self.listener.close()
 
     @property
     def busy(self) -> bool:
         return self.substrate is not None or self.status.get("occupied", True)
 
     def poll(self, now: float) -> str:
-        try:
-            status = self.node.status()
-            if not isinstance(status, dict) or not isinstance(status.get("state"), str):
-                raise ValueError("response is not a labnode status")
-            self.status = status
-        except NodeUnreachable as error:
-            self.status = {"state": NOT_STARTED, "error": str(error)}
-        except (NodeError, ValueError) as error:
-            self.status = {"state": UNREADABLE, "error": str(error)}
+        payload, problem, detail = self.listener.latest()
+        self.status = {"state": problem, "error": detail} if problem else payload
         state = self.status["state"]
         if self.substrate is not None and state in COLLECTABLE_STATES:
             return "done"
@@ -128,6 +130,7 @@ class RemoteExperiment:
     def start(self, substrate: Substrate, now: float) -> None:
         try:
             self.status = self.node.start(substrate.substrate_id)
+            self.listener.update(self.status)
         except (NodeError, NodeUnreachable, ValueError) as error:
             raise RuntimeError(f"{self.name} did not start {substrate.substrate_id}: {error}") from None
         self.substrate = substrate
@@ -137,6 +140,7 @@ class RemoteExperiment:
             raise RuntimeError(f"client {self.name} has no sample to release")
         try:
             self.status = self.node.taken(self.substrate.substrate_id)
+            self.listener.update(self.status)
         except (NodeError, NodeUnreachable, ValueError) as error:
             raise RuntimeError(f"{self.name} did not release {self.substrate.substrate_id}: {error}") from None
         substrate = self.substrate

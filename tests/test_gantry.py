@@ -565,6 +565,16 @@ class WebGuiTests(unittest.TestCase):
         finally:
             scheduler.stop()
 
+    def test_gantry_stream_needs_main_py_and_reports_the_scheduler_position(self):
+        from web import server as web_server
+
+        self.assertEqual(self.client.get("/api/gantry/stream").status_code, 404)
+        manager = build_manager([f"A=127.0.0.1:{free_port()}@30,40"], ["A"], movement_time=0.2, home="5,6")
+        store = web_server.PresetsStore(None, self.presets_path, legacy_path=None, scheduler=Scheduler(manager))
+        self.assertEqual(store.gantry_reading(), {
+            "x": 5.0, "y": 6.0, "moving": False, "source": "simulated", "problem": None, "detail": None,
+        })
+
 
 if __name__ == "__main__":
     unittest.main()

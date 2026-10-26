@@ -167,10 +167,10 @@
 
     <section>
       <h2>MOVE GANTRY</h2>
-      <p class="hint">Bed coordinates; sends POST /pos to the gantry. Double-click the bed to move there. Refused while the gantry is moving.</p>
+      <p class="hint">Bed coordinates in mm; the scheduler sends the gantry a move. Double-click the bed to move there. Refused while the gantry is moving.</p>
       <form class="row" id="move-form">
-        <span class="mono">x</span><input type="text" id="move-x" class="num" value="50">
-        <span class="mono">y</span><input type="text" id="move-y" class="num" value="30">
+        <span class="mono">x</span><input type="text" id="move-x" class="num" value="1500">
+        <span class="mono">y</span><input type="text" id="move-y" class="num" value="500">
         <button type="submit" id="move-button">Move gantry</button>
       </form>
       <div id="move-result" class="mono small"></div>
@@ -236,6 +236,7 @@
 
 const POLL_MS = 150;
 const BED_MARGIN = 44;
+const MONO = 'font-family="Menlo, monospace"';
 const HALF_W = 52;
 const HALF_H = 32;
 const NOT_STARTED = "not started";
@@ -254,9 +255,11 @@ let statuses = {};
 let gantryRaw = null;       // [x, y] in gantry coordinates
 let gantryState = null;     // /state payload in simulator mode
 let gantryProblem = "";
+let streamLive = false;     // main.py's position stream is connected
+let gantryFrame = 0;        // pending animation frame for the gantry layer
 let drag = null;            // {name, dx, dy}
 let hover = null;           // [bx, by]
-let view = { scale: 1, ox: 0, oy: 0 };
+let view = { scale: 1, ox: 0, oy: 0, upper: 0, bottom: 0, width: 0 };
 let saveTimer = null;
 let lastPollOk = false;
 
@@ -512,10 +515,24 @@ function applySnapshot(snap) {
       raw = null; state = null; problem = UNREADABLE; detail = "unexpected response";
     }
   }
-  gantryRaw = raw;
   gantryState = state;
-  gantryProblem = problem ? problemLabel(problem) : (payload == null ? "NO ADDRESS" : "OFF LAYOUT");
+  // Under main.py the stream is newer than this poll, so it owns the position.
+  if (!streamLive) setGantry(raw, problem, detail, source, payload == null);
 
+  const cal = $("calibration");
+  if (calibration.homed) {
+    const [sx, sy] = presets.calibration.scale;
+    cal.textContent = `HOMED  scale ${Number(sx.toPrecision(4))}, ${Number(sy.toPrecision(4))}`;
+    cal.className = "mono small grow good";
+  } else {
+    cal.textContent = "NOT HOMED  showing raw coordinates";
+    cal.className = "mono small grow warn";
+  }
+}
+
+function setGantry(raw, problem, detail, source, noAddress) {
+  gantryRaw = raw;
+  gantryProblem = problem ? problemLabel(problem) : (noAddress ? "NO ADDRESS" : "OFF LAYOUT");
   const readout = $("readout");
   if (raw === null) {
     readout.textContent = (problem ? `${problemLabel(problem)}  ${detail}` : detail || "NO GANTRY ADDRESS").slice(0, 80);
@@ -526,15 +543,28 @@ function applySnapshot(snap) {
     readout.textContent = `RAW ${raw[0].toFixed(1)}, ${raw[1].toFixed(1)}  →  BED ${bed[0].toFixed(1)}, ${bed[1].toFixed(1)}${label}`;
     readout.className = "mono";
   }
-  const cal = $("calibration");
-  if (calibration.homed) {
-    const [sx, sy] = presets.calibration.scale;
-    cal.textContent = `HOMED  scale ${Number(sx.toPrecision(4))}, ${Number(sy.toPrecision(4))}`;
-    cal.className = "mono small grow good";
-  } else {
-    cal.textContent = "NOT HOMED  showing raw coordinates";
-    cal.className = "mono small grow warn";
-  }
+}
+
+// Under main.py the gantry position is pushed as it changes (Server-Sent
+// Events) and only the gantry layer is redrawn, once per screen frame.
+// python -m web alone has no stream and keeps polling.
+function startGantryStream() {
+  if (!window.EventSource) return;
+  const stream = new EventSource("/api/gantry/stream");
+  stream.onmessage = (event) => {
+    const reading = JSON.parse(event.data);
+    const raw = reading.x === null || reading.y === null ? null : [Number(reading.x), Number(reading.y)];
+    streamLive = true;
+    setGantry(raw, raw ? "" : reading.problem || UNREADABLE, reading.detail || "", reading.source, false);
+    if (!gantryFrame) gantryFrame = requestAnimationFrame(() => { gantryFrame = 0; drawGantryLayer(); });
+  };
+  // EventSource reconnects by itself (e.g. after restarting main.py); until then, polling shows the gantry.
+  stream.onerror = () => { streamLive = false; };
+}
+
+function drawGantryLayer() {
+  const layer = document.getElementById("gantry-layer");
+  if (layer) layer.innerHTML = drawGantry(view.upper, view.bottom, view.width, MONO);
 }
 
 // ------------------------------------------------------------- drawing
@@ -599,7 +629,7 @@ function draw() {
   parts.push(text(gx + 8, gy - 6, "GANTRY HOME", `font-size="8" font-weight="bold" fill="var(--muted)" ${mono}`));
 
   for (const s of presets.stations) parts.push(drawStation(s, mono));
-  parts.push(drawGantry(upper, bottom, width, mono));
+  parts.push('<g id="gantry-layer"></g>');
 
   if (hover) {
     let content = `CURSOR  bed ${hover[0].toFixed(1)}, ${hover[1].toFixed(1)}`;
@@ -611,6 +641,8 @@ function draw() {
   }
   svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
   svg.innerHTML = parts.join("");
+  Object.assign(view, { upper, bottom, width });
+  drawGantryLayer();
 }
 
 function drawStation(s, mono) {
@@ -867,7 +899,7 @@ $("clear-calibration").addEventListener("click", () => { calibration.clear(); se
 
 // --------------------------------------------------------------- start
 
-loadPresets().then(poll).catch(() => {
+loadPresets().then(() => { startGantryStream(); poll(); }).catch(() => {
   $("live").textContent = "GUI SERVER DOWN";
   setError("Could not load the presets. Is python main.py running?");
 });

@@ -46,7 +46,8 @@ from helpers.presets import PRESETS_PATH, load_presets, station_bed_to_raw
 from labnode.server import LOOPBACK_HOSTS, TOKEN_ENV
 
 
-TICK_SECONDS = 0.1
+# No network calls happen in a tick (listeners do the reading), so it can run often.
+TICK_SECONDS = 0.02
 DEFAULT_PORT = 8200
 DEFAULT_HOME = "0,0"
 DEFAULT_SHELF = "300,500"
@@ -150,6 +151,9 @@ class Scheduler:
         self._thread.join(timeout=1.0)
         if self.manager.gantry is not None:
             self.manager.gantry.close()
+        for client in self.manager.clients.values():
+            if hasattr(client, "close"):
+                client.close()
 
     def pos(self) -> dict[str, Any]:
         with self.lock:

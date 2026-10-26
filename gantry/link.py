@@ -25,7 +25,7 @@ from labnode.listen import UNREADABLE
 REQUEST_TIMEOUT = 2.0
 READY_TIMEOUT = 30.0
 READY_POLL = 0.05
-POSITION_POLL = 0.1
+POSITION_POLL = 0.02
 
 
 class GantryLink:
