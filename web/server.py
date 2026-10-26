@@ -89,6 +89,12 @@ class PresetsStore:
             payload = self.scheduler.pos()
         return statuses, (payload, "", "")
 
+    def gantry_link(self) -> Optional[dict[str, Any]]:
+        """What happened to the last command sent to the gantry node, under main.py."""
+        if self.scheduler is None or self.scheduler.manager.gantry is None:
+            return None
+        return self.scheduler.manager.gantry.report()
+
     def close(self) -> None:
         if self.poller is not None:
             self.poller.close()
@@ -136,14 +142,14 @@ def move_scheduler(scheduler: Any, x: float, y: float) -> dict[str, Any]:
 
 
 def move_gantry(address: str, x: float, y: float) -> dict[str, Any]:
-    """Send POST /pos to the gantry and describe the outcome for the page."""
+    """Send POST /pos to the scheduler at ``address`` and describe the outcome for the page."""
     if not address:
-        return {"ok": False, "message": "No gantry address set"}
+        return {"ok": False, "message": "No scheduler address set"}
     try:
         client = NodeClient(address, token=os.environ.get(TOKEN_ENV) or None, timeout=2.0)
         client._request("POST", "/pos", {"x": x, "y": y})
     except NodeUnreachable:
-        return {"ok": False, "message": "Gantry NOT STARTED: nothing at that address"}
+        return {"ok": False, "message": "Scheduler NOT STARTED: nothing at that address"}
     except NodeError as error:
         return {"ok": False, "message": f"Refused: {error.detail}"}
     except ValueError as error:
@@ -200,6 +206,7 @@ def create_app(store: PresetsStore):
         return {
             "statuses": statuses,
             "gantry": {"payload": payload, "problem": problem, "detail": detail},
+            "gantry_link": store.gantry_link(),
             "unsaved": store.unsaved,
         }
 
@@ -207,7 +214,7 @@ def create_app(store: PresetsStore):
     def post_move(request: MoveRequest) -> dict[str, Any]:
         if store.scheduler is not None:
             return move_scheduler(store.scheduler, request.x, request.y)
-        return move_gantry(store.get()["gantry_address"], request.x, request.y)
+        return move_gantry(store.get()["scheduler_address"], request.x, request.y)
 
     return app
 

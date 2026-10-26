@@ -3,6 +3,10 @@
 Clients are either in-memory ``ExperimentClient`` objects (tests, event-jumping
 simulation) or ``RemoteExperiment`` handles for labnode processes that were
 started separately, e.g. from ``sim/`` or lab-devices.
+
+The scheduler times every gantry leg itself (``movement_time``). With a
+``gantry`` link it also sends the gantry node move, pick and place as it
+goes, and assumes they worked.
 """
 
 from __future__ import annotations
@@ -169,11 +173,14 @@ class GantryManager:
         movement_time: float = 1.0,
         locations: Optional[dict[str, Point]] = None,
         shelf_slots: Optional[int] = None,
+        gantry: Optional[Any] = None,
     ) -> None:
         """``locations`` maps "home", "shelf" and each client name to bed (x, y).
 
         ``shelf_slots`` caps how many samples the shelf holds (each keeps its slot
         while it is out at an experiment); None means only the 30-sample limit.
+        ``gantry`` is a GantryLink (anything with ``send(command, **arguments)``);
+        None means the gantry is only simulated.
         """
         if movement_time <= 0:
             raise ValueError("movement_time must be positive")
@@ -184,6 +191,7 @@ class GantryManager:
             raise ValueError(f"{len(substrates)} samples but the shelf has {shelf_slots} slots")
         self.substrates = substrates
         self.shelf_slots = shelf_slots
+        self.gantry = gantry
         self.movement_time = movement_time
         self.now = 0.0
         self.position = HOME
@@ -299,7 +307,20 @@ class GantryManager:
         start = self.coordinates()
         assert start is not None
         self._manual_move = _ManualMove(start, (float(point[0]), float(point[1])), self.now + self.movement_time)
+        self._command("move", x=float(point[0]), y=float(point[1]), params={"to": MANUAL})
         self.events.append((self.now, "gantry_manual_move", f"({point[0]:g}, {point[1]:g})"))
+
+    def _command(self, command: str, **arguments: Any) -> None:
+        if self.gantry is not None:
+            self.gantry.send(command, **arguments)
+
+    def _move_command(self, location: str) -> None:
+        if self.locations:
+            x, y = self.locations[location]
+            self._command("move", x=x, y=y, params={"to": location})
+
+    def _hand_command(self, command: str, location: str, substrate: Substrate) -> None:
+        self._command(command, params={"station": location, "sample_id": substrate.substrate_id})
 
     def _point_of(self, position: str) -> Point:
         if position == MANUAL:
@@ -315,6 +336,7 @@ class GantryManager:
             "position": self.position,
             "movement_time": self.movement_time,
             "shelf_slots": self.shelf_slots,
+            "gantry_link": self.gantry.report() if self.gantry is not None else None,
             "transport": self.transport_snapshot,
             "manual_move": None if self._manual_move is None else {
                 "to": list(self._manual_move.end),
@@ -442,6 +464,7 @@ class GantryManager:
             phase=phase,
             arrives_at=self.now + self.movement_time,
         )
+        self._move_command(source)
         self.events.append((self.now, "gantry_departed", f"{source}->{destination}:{substrate.substrate_id}"))
 
     def _finish_transport(self) -> None:
@@ -466,11 +489,14 @@ class GantryManager:
                     raise RuntimeError("client released the wrong substrate")
                 self._waiting.pop(transport.substrate.substrate_id, None)
                 transport.substrate.location = "gantry"
+            self._hand_command("pick", transport.source, transport.substrate)
             transport.phase = "delivery"
             transport.arrives_at = self.now + self.movement_time
+            self._move_command(transport.destination)
             self.events.append((self.now, "gantry_picked_up", transport.substrate.substrate_id))
             return
 
+        self._hand_command("place", transport.destination, transport.substrate)
         if transport.destination == "shelf":
             if transport.substrate.next_experiment is None:
                 transport.substrate.mark_returned_to_shelf()
@@ -487,9 +513,11 @@ class GantryManager:
             except RuntimeError as error:
                 # The node would not take the sample, so carry it back to the shelf.
                 self.events.append((self.now, "delivery_failed", str(error)))
+                self._hand_command("pick", transport.destination, transport.substrate)
                 transport.source = transport.destination
                 transport.destination = "shelf"
                 transport.arrives_at = self.now + self.movement_time
+                self._move_command("shelf")
                 return
             transport.substrate.mark_delivered(transport.destination)
         self.position = transport.destination

@@ -299,6 +299,66 @@ class GantrySimulationTests(unittest.TestCase):
         ok = locked.post("/pos", json={"x": 1, "y": 1}, headers={"Authorization": "Bearer secret"})
         self.assertEqual(ok.status_code, 202)
 
+    def test_gantry_gets_move_pick_and_place_in_order(self):
+        class Recorder:
+            def __init__(self):
+                self.sent = []
+
+            def send(self, command, **arguments):
+                self.sent.append((command, arguments.get("params", {}).get("to") or arguments["params"].get("station")))
+
+        recorder = Recorder()
+        client = ExperimentClient("experiment_a", duration=1.0)
+        locations = {"home": (0.0, 0.0), "shelf": (10.0, 20.0), "experiment_a": (30.0, 40.0)}
+        manager = GantryManager([client], [Substrate("s1", ("experiment_a",))], movement_time=1.0,
+                                locations=locations, gantry=recorder)
+        manager.run_until_complete()
+        self.assertEqual(recorder.sent, [
+            ("move", "shelf"), ("pick", "shelf"), ("move", "experiment_a"), ("place", "experiment_a"),
+            ("move", "experiment_a"), ("pick", "experiment_a"), ("move", "shelf"), ("place", "shelf"),
+        ])
+
+    def test_gantry_link_reports_commands_that_are_not_available(self):
+        from gantry.link import GantryLink
+
+        link = GantryLink(f"127.0.0.1:{free_port()}", timeout=0.5)
+        self.addCleanup(link.close)
+        self.assertIsNone(link.report()["last"])
+        link.send("move", x=1.0, y=2.0)
+        link.wait_idle()
+        report = link.report()
+        self.assertFalse(report["last"]["ok"])
+        self.assertIn("move not available: gantry NOT STARTED", report["last"]["message"])
+        self.assertEqual(report["failures"], 1)
+
+    def test_gantry_link_drives_a_labnode_gantry(self):
+        import uvicorn
+
+        from gantry.link import GantryLink
+        from sim.fake_gantry import FakeGantry
+
+        node = FakeGantry(move_time=0.05)
+        port = free_port()
+        server = uvicorn.Server(uvicorn.Config(create_node_app(node), host="127.0.0.1", port=port, log_level="error"))
+        thread = threading.Thread(target=server.run, daemon=True)
+        thread.start()
+        link = GantryLink(f"127.0.0.1:{port}")
+        try:
+            while not server.started:
+                time.sleep(0.01)
+            link.send("move", x=3.0, y=4.0, params={"to": "experiment_a"})
+            link.wait_idle()
+            self.assertTrue(link.report()["last"]["ok"])
+            node.wait(2)
+            self.assertEqual(node.position()["x"], 3.0)
+            link.send("pick", params={"station": "experiment_a"})
+            link.wait_idle()
+            self.assertEqual(link.report()["last"]["message"], "pick sent")
+        finally:
+            link.close()
+            server.should_exit = True
+            thread.join(timeout=5)
+
     def test_poller_reads_nodes_and_gantry_position(self):
         gantry = serve_text(b'{"x": 12.5, "y": 3.0, "z": 0}')
         node = LiveNode("a", 5.0)
@@ -399,15 +459,17 @@ class WebGuiTests(unittest.TestCase):
         presets["calibration"] = {"home_raw": [100.0, 100.0], "home_bed": [0.0, 0.0], "scale": [0.5, 0.5]}
         settings = settings_from_presets(presets)
 
-        self.assertEqual(settings.pop("port"), 8123)
+        self.assertEqual(settings["gantry"], "127.0.0.1:8123")
         # Bed (35, 45) through the calibration: raw = 100 + bed / 0.5.
         self.assertEqual(settings["nodes"][0], ("experiment_a", "127.0.0.1:8001", (170.0, 190.0)))
         manager = build_manager(**settings)
+        self.addCleanup(manager.gantry.close)
+        self.assertEqual(manager.gantry.address, "http://127.0.0.1:8123")
         self.assertEqual((manager.shelf_slots, len(manager.substrates)), (3, 3))
         with self.assertRaises(ValueError):
             manager.add_substrate(Substrate("sample_4", ("experiment_a",)))
         with self.assertRaises(ValueError):
-            build_manager(**{**settings, "shelf_slots": 2})
+            build_manager(**{**settings, "shelf_slots": 2, "gantry": ""})
 
     def test_snapshot_reports_nodes_that_are_not_started(self):
         presets = default_presets()
@@ -423,7 +485,7 @@ class WebGuiTests(unittest.TestCase):
         self.assertEqual(snap["statuses"]["experiment_a"]["state"], NOT_STARTED)
         self.assertEqual(snap["gantry"]["problem"], NOT_STARTED)
 
-    def test_move_is_forwarded_to_the_gantry(self):
+    def test_move_is_forwarded_to_the_scheduler(self):
         import uvicorn
 
         manager = build_manager([f"A=127.0.0.1:{free_port()}@30,40"], ["A"], movement_time=0.2)
@@ -437,7 +499,7 @@ class WebGuiTests(unittest.TestCase):
             while not server.started:
                 time.sleep(0.01)
             presets = default_presets()
-            presets["gantry_address"] = f"127.0.0.1:{port}"
+            presets["scheduler_address"] = f"127.0.0.1:{port}"
             self.client.put("/api/presets", json=presets)
 
             self.assertEqual(self.client.post("/api/move", json={"x": 40, "y": 20}).json(), {"ok": True, "message": "Moving"})
@@ -447,7 +509,7 @@ class WebGuiTests(unittest.TestCase):
             time.sleep(0.4)
             self.assertEqual(scheduler.pos()["x"], 40.0)
 
-            presets["gantry_address"] = f"127.0.0.1:{free_port()}"
+            presets["scheduler_address"] = f"127.0.0.1:{free_port()}"
             self.client.put("/api/presets", json=presets)
             self.assertIn("NOT STARTED", self.client.post("/api/move", json={"x": 1, "y": 1}).json()["message"])
         finally:

@@ -79,7 +79,7 @@ helpers/           shared code
 sim/               fake hardware for running without a lab, one terminal each
   experiment_a.py …  fake experiment nodes with a fixed name, port and duration
   node.py            generic fake node (letter, port, duration as arguments)
-  fake_gantry.py     fake gantry with a draggable dot, for the GUI's Lab (HTTP) mode
+  fake_gantry.py     fake gantry node (:8100): receives move, pick and place and prints them
 tests/             unit and end-to-end tests
 legacy/            the old Tkinter GUI and the timer prototype, kept for reference
 data/              your settings
@@ -144,18 +144,28 @@ Then open one terminal per process, in any order:
 .venv/bin/python sim/experiment_a.py     # terminal 1
 .venv/bin/python sim/experiment_b.py     # terminal 2
 .venv/bin/python sim/experiment_c.py     # terminal 3
-.venv/bin/python main.py                 # terminal 4: scheduler + GUI, then open http://127.0.0.1:8080
+.venv/bin/python sim/fake_gantry.py      # terminal 4 (optional): the gantry node
+.venv/bin/python main.py                 # terminal 5: scheduler + GUI, then open http://127.0.0.1:8080
 ```
 
-`main.py --no-gui` (or `python -m gantry`) runs the scheduler and gantry API
-without the GUI; `python -m web` runs only the GUI, to watch a gantry running
+The scheduler times every gantry leg itself (`move_time`) and, as it goes,
+sends the gantry node at `gantry_address` (default `127.0.0.1:8100`) a `move`
+to each station, then `pick` or `place` there. It assumes each command worked
+and carries on; commands go out in order on their own thread, each waiting for
+the gantry to finish the last. If the gantry rejects one or is not running, the
+GUI shows it under the gantry readout (e.g. *move not available: gantry NOT
+STARTED*) and the terminal prints it once. Clear the gantry address (or pass
+`--gantry ""`) to only simulate the gantry.
+
+`main.py --no-gui` (or `python -m gantry`) runs the scheduler and its API
+without the GUI, on `--port` (default 8200); `python -m web` runs only the GUI, to watch a gantry running
 elsewhere. `--gui-port` moves the GUI off 8080.
 
 `main.py` takes its settings from `data/presets.json` (see **Presets**
 below). Any flag overrides its preset, e.g.:
 
 ```bash
-.venv/bin/python main.py --port 8100 --home 0,0 --shelf 10,30 --slots 10 \
+.venv/bin/python main.py --gantry 127.0.0.1:8100 --home 0,0 --shelf 10,30 --slots 10 \
     --node A=8001@35,45 --node B=8002@60,15 --node C=8003@85,40 \
     --route A,B,C --route C,A --route B,C --move-time 1
 ```
@@ -172,18 +182,13 @@ Real instruments live in [lab-devices](https://github.com/henrybon806/lab-device
 start a new one from its `templates/experiment/`. To point the gantry at real nodes, put their
 addresses in `data/presets.json` (or pass `--node`).
 
-To try the GUI's *Lab (HTTP)* mode on its own, run the fake gantry (port 8100)
-with `python -m web` instead of `main.py`:
-
-```bash
-.venv/bin/python sim/fake_gantry.py
-.venv/bin/python -m web
-```
+The real gantry is a `Gantry` node in lab-devices (`templates/gantry/`); point
+`gantry_address` at it instead of the fake one.
 
 `main.py` with no arguments uses exactly those nodes and routes. It
 drives the nodes over HTTP (`POST /start`, `POST /taken`) on wall-clock time
 and serves its API under `/scheduler` on the GUI's port (on `--port`, default
-8100, with `--no-gui`).
+8200, with `--no-gui`).
 
 `@x,y` is where each station sits on the bed. The gantry has its own `--home`
 spot, separate from the shelf: it starts there and travels to the shelf like
@@ -306,6 +311,7 @@ it in the web GUI and press **Save presets**; `main.py` (and
   "bed": [100.0, 60.0],
   "gantry_source": "simulator",
   "gantry_address": "127.0.0.1:8100",
+  "scheduler_address": "127.0.0.1:8200",
   "gantry_home": [0.0, 0.0],
   "move_time": 1.0,
   "shelf_slots": 10,
@@ -320,7 +326,10 @@ it in the web GUI and press **Save presets**; `main.py` (and
 
 - Positions are bed coordinates, as the GUI shows them. The scheduler
   converts them to gantry coordinates through the saved calibration.
-- The gantry listens on the port in `gantry_address`.
+- `gantry_address` is the gantry node the scheduler sends move, pick and place
+  to; empty means the gantry is only simulated.
+- `scheduler_address` is only for `python -m web` on its own: where it finds a
+  scheduler started with `--no-gui`.
 - Stations without a node address are drawn but not used by the gantry.
 - Route entries are letters (`A` → `experiment_a`) or station names.
 - The number of routes cannot exceed `shelf_slots` (at most 30).

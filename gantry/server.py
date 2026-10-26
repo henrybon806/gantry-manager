@@ -5,19 +5,20 @@ then, from the project folder:
 
     python -m gantry        # same as python main.py --no-gui
 
-Everything comes from data/presets.json (saved from the web GUI): the gantry port,
-home, move time, shelf location and slots, each station's node address and
-location, and the sample routes. Any flag overrides its preset:
+Everything comes from data/presets.json (saved from the web GUI): the gantry
+node's address, home, move time, shelf location and slots, each station's node
+address and location, and the sample routes. Any flag overrides its preset:
 
-    python -m gantry --port 8100 --home 0,0 --shelf 10,30 \\
+    python -m gantry --port 8200 --gantry 127.0.0.1:8100 --home 0,0 --shelf 10,30 \\
         --node A=8001@35,45 --node B=8002@60,15 --node C=8003@85,40 \\
         --route A,B,C --route C,A --route B,C
 
 ``@x,y`` is where each station sits on the bed. The gantry starts at its home,
 its own spot, and travels to the shelf like any other location.
 
-The scheduler drives the nodes over HTTP (POST /start, POST /taken) and serves
-its own state for the GUI:
+The scheduler drives the nodes over HTTP (POST /start, POST /taken), sends the
+gantry node move, pick and place (assuming they work; see gantry/link.py), and
+serves its own state on --port (default 8200):
 
     GET /pos       current gantry position {"x", "y", "z", "moving", "at"}
     POST /pos      {"x": .., "y": ..} moves the idle gantry there; 409 while it moves
@@ -33,20 +34,20 @@ import os
 import threading
 import time
 import traceback
-import urllib.parse
 from pathlib import Path
 from typing import Any, Optional
 
 from pydantic import BaseModel
 
+from gantry.link import GantryLink
 from gantry.scheduler import HOME, GantryManager, Point, RemoteExperiment, parse_route
 from gantry.substrates import Substrate
 from helpers.presets import PRESETS_PATH, load_presets, station_bed_to_raw
-from labnode.client import normalize_url
 from labnode.server import LOOPBACK_HOSTS, TOKEN_ENV
 
 
 TICK_SECONDS = 0.1
+DEFAULT_PORT = 8200
 DEFAULT_HOME = "0,0"
 DEFAULT_SHELF = "10,30"
 
@@ -75,8 +76,12 @@ def build_manager(
     home: "str | Point" = DEFAULT_HOME,
     shelf: "str | Point" = DEFAULT_SHELF,
     shelf_slots: Optional[int] = None,
+    gantry: Optional[str] = None,
 ) -> GantryManager:
-    """``nodes`` are ``(name, address, (x, y))`` tuples or ``"A=8001@35,45"`` strings."""
+    """``nodes`` are ``(name, address, (x, y))`` tuples or ``"A=8001@35,45"`` strings.
+
+    ``gantry`` is the gantry node's address; empty or None only simulates it.
+    """
     token = os.environ.get(TOKEN_ENV) or None
     clients = []
     locations = {
@@ -92,13 +97,15 @@ def build_manager(
         Substrate(f"sample_{index + 1}", parse_route(route, known))
         for index, route in enumerate(routes)
     ]
+    link = GantryLink(gantry.strip(), token=token) if gantry and gantry.strip() else None
     return GantryManager(
         clients, substrates, movement_time=movement_time, locations=locations, shelf_slots=shelf_slots,
+        gantry=link,
     )
 
 
 def settings_from_presets(presets: dict[str, Any]) -> dict[str, Any]:
-    """build_manager arguments (plus the port) from presets.json.
+    """build_manager arguments from presets.json.
 
     Presets hold bed coordinates; the gantry works in its own, so they go
     through the saved HOME/REF calibration.
@@ -109,10 +116,6 @@ def settings_from_presets(presets: dict[str, Any]) -> dict[str, Any]:
         for station in presets["stations"]
         if station["name"] != "shelf" and station["address"]
     ]
-    try:
-        port = urllib.parse.urlparse(normalize_url(presets["gantry_address"])).port
-    except ValueError:
-        port = None
     return {
         "nodes": nodes,
         "routes": presets["routes"],
@@ -120,7 +123,7 @@ def settings_from_presets(presets: dict[str, Any]) -> dict[str, Any]:
         "home": station_bed_to_raw(presets, presets["gantry_home"]),
         "shelf": station_bed_to_raw(presets, [shelf["x"], shelf["y"]]),
         "shelf_slots": presets["shelf_slots"],
-        "port": port or 8100,
+        "gantry": presets["gantry_address"],
     }
 
 
@@ -145,6 +148,8 @@ class Scheduler:
     def stop(self) -> None:
         self._stop.set()
         self._thread.join(timeout=1.0)
+        if self.manager.gantry is not None:
+            self.manager.gantry.close()
 
     def pos(self) -> dict[str, Any]:
         with self.lock:
@@ -233,7 +238,7 @@ def create_app(scheduler: Scheduler, token: Optional[str] = None):
 def add_arguments(parser: argparse.ArgumentParser) -> None:
     """The gantry's flags, shared with main.py."""
     parser.add_argument("--presets", type=Path, default=PRESETS_PATH, help="presets file (default data/presets.json)")
-    parser.add_argument("--port", type=int, help="listen port (default: from the gantry address in presets, else 8100)")
+    parser.add_argument("--port", type=int, help=f"scheduler API port without the GUI (default {DEFAULT_PORT})")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--node", action="append", help="LETTER=address@x,y, repeat per node (replaces the preset stations)")
     parser.add_argument("--home", help="gantry home x,y")
@@ -241,6 +246,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--slots", type=int, help="shelf slots")
     parser.add_argument("--route", action="append", help="one sample's route, e.g. A,B,C; repeat per sample (replaces the preset routes)")
     parser.add_argument("--move-time", type=float, help="seconds per gantry leg")
+    parser.add_argument("--gantry", help="gantry node address for move/pick/place; \"\" to only simulate it")
 
 
 def scheduler_from_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> tuple[Scheduler, int, Optional[str]]:
@@ -258,8 +264,8 @@ def scheduler_from_args(parser: argparse.ArgumentParser, args: argparse.Namespac
             settings["shelf_slots"] = args.slots
         if args.move_time is not None:
             settings["movement_time"] = args.move_time
-        port = args.port or settings.pop("port")
-        settings.pop("port", None)
+        if args.gantry is not None:
+            settings["gantry"] = args.gantry
         manager = build_manager(**settings)
     except ValueError as error:
         parser.error(str(error))
@@ -267,13 +273,14 @@ def scheduler_from_args(parser: argparse.ArgumentParser, args: argparse.Namespac
     token = os.environ.get(TOKEN_ENV) or None
     if token is None and args.host not in LOOPBACK_HOSTS:
         parser.error(f"set {TOKEN_ENV} before listening on {args.host}")
-    return Scheduler(manager), port, token
+    return Scheduler(manager), args.port or DEFAULT_PORT, token
 
 
 def describe(scheduler: Scheduler, state_url: str) -> str:
     manager = scheduler.manager
     stations = ", ".join(f"{name} {client.url}" for name, client in manager.clients.items())
-    return (f"scheduler on {state_url}  |  {len(manager.substrates)} samples, "
+    gantry = manager.gantry.address if manager.gantry is not None else "simulated only"
+    return (f"scheduler on {state_url}  |  gantry {gantry}  |  {len(manager.substrates)} samples, "
             f"{manager.shelf_slots} shelf slots  |  {stations}")
 
 

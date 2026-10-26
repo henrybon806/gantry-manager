@@ -1,7 +1,8 @@
 """presets.json: every setting the GUI and gantry server would otherwise need re-entering.
 
-Bed size, gantry address/home/move time, shelf location and slots, each
-station's node address and location, calibration and sample routes.
+Bed size, the gantry node's address, home and move time, where python -m web
+finds the scheduler, shelf location and slots, each station's node address
+and location, calibration and sample routes.
 """
 
 from __future__ import annotations
@@ -33,6 +34,7 @@ def default_presets() -> dict[str, Any]:
         "bed": [100.0, 60.0],
         "gantry_source": "simulator",
         "gantry_address": f"{DEFAULT_HOST}:8100",
+        "scheduler_address": f"{DEFAULT_HOST}:8200",
         "gantry_home": [0.0, 0.0],
         "move_time": 1.0,
         "shelf_slots": 10,
@@ -67,6 +69,9 @@ def validate_presets(data: Any) -> dict[str, Any]:
     address = data.get("gantry_address", defaults["gantry_address"])
     if not isinstance(address, str):
         raise ValueError("gantry_address must be text")
+    scheduler_address = data.get("scheduler_address", defaults["scheduler_address"])
+    if not isinstance(scheduler_address, str):
+        raise ValueError("scheduler_address must be text")
     home = _pair(data.get("gantry_home", defaults["gantry_home"]), "gantry_home")
     try:
         move_time = float(data.get("move_time", defaults["move_time"]))
@@ -109,6 +114,7 @@ def validate_presets(data: Any) -> dict[str, Any]:
         "bed": bed,
         "gantry_source": source,
         "gantry_address": address.strip(),
+        "scheduler_address": scheduler_address.strip(),
         "gantry_home": home,
         "move_time": move_time,
         "shelf_slots": int(slots),
@@ -151,11 +157,13 @@ def station_bed_to_raw(presets: dict[str, Any], point: list[float]) -> tuple[flo
 
 
 def poll_targets(layout: dict[str, Any]) -> tuple[dict[str, str], Optional[str], str]:
-    """What a NodePoller should read for this layout: stations, gantry address, gantry path."""
+    """What python -m web's NodePoller reads: stations, and the scheduler's /state
+    (Simulator) or the gantry node's /position (Lab)."""
     stations = {
         station["name"]: station["address"]
         for station in layout["stations"]
         if station["name"] != "shelf" and station["address"]
     }
-    path = "/state" if layout["gantry_source"] == "simulator" else "/position"
-    return stations, layout["gantry_address"] or None, path
+    if layout["gantry_source"] == "simulator":
+        return stations, layout["scheduler_address"] or None, "/state"
+    return stations, layout["gantry_address"] or None, "/position"

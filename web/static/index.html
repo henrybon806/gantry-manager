@@ -148,13 +148,14 @@
 
     <section>
       <h2>GANTRY SOURCE</h2>
-      <p class="hint">Simulator shows the scheduler's full view: the gantry between your boxes, the samples and the queue. Lab shows only the gantry's x, y. Under main.py both come straight from the scheduler; with python -m web alone, the address is where to read them.</p>
+      <p class="hint">The address is the gantry node: the scheduler sends it move, pick and place and assumes they worked (leave it empty to only simulate the gantry). Simulator shows the scheduler's full view; Lab shows only the gantry's x, y.</p>
       <div class="row">
         <label class="radio"><input type="radio" name="source" value="simulator"> Simulator</label>
         <label class="radio"><input type="radio" name="source" value="lab"> Lab (HTTP)</label>
         <input type="text" id="gantry-address" class="grow" spellcheck="false">
       </div>
       <div id="readout" class="mono"></div>
+      <div id="gantry-link" class="mono small"></div>
       <div class="row">
         <span class="small">home</span>
         <input type="text" id="home-pos-x" class="num">,<input type="text" id="home-pos-y" class="num">
@@ -451,6 +452,7 @@ async function poll() {
     if (!response.ok) throw new Error();
     const snap = await response.json();
     applySnapshot(snap);
+    showGantryLink(snap.gantry_link);
     if (snap.unsaved !== unsaved && !saveTimer) { unsaved = snap.unsaved; showPresetsStatus(); }
     lastPollOk = true;
   } catch {
@@ -485,6 +487,20 @@ function simulatedPosition(state) {
   const start = points[startName], end = points[endName];
   const progress = Math.min(1, Math.max(0, (state.now - transport.started_at) / state.movement_time));
   return [start[0] + (end[0] - start[0]) * progress, start[1] + (end[1] - start[1]) * progress];
+}
+
+function showGantryLink(link) {
+  // Under main.py: how the gantry node answered the scheduler's last command.
+  const el = $("gantry-link");
+  if (!link) { el.textContent = ""; return; }
+  if (!link.last) {
+    el.textContent = `GANTRY NODE ${link.address}: no command sent yet`;
+    el.className = "mono small";
+    return;
+  }
+  const failures = link.failures ? `  (${link.failures} failed so far)` : "";
+  el.textContent = `GANTRY NODE: ${link.last.message}${failures}`.slice(0, 120);
+  el.className = `mono small ${link.last.ok ? "good" : "bad"}`;
 }
 
 function applySnapshot(snap) {
