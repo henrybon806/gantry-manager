@@ -444,7 +444,10 @@ function setGantry(pos, problem, detail, source, noAddress, z) {
     readout.textContent = (problem ? `${problemLabel(problem)}  ${detail}` : detail || "NO GANTRY ADDRESS").slice(0, 90);
     readout.className = "mono small bad";
   } else {
-    readout.textContent = source === "simulated" ? "SIMULATED" : "";
+    // The dot is pinned to the bed's edge when the gantry is outside it; say so here.
+    const [bedW, bedH] = bedSize();
+    const offBed = pos[0] < 0 || pos[0] > bedW || pos[1] < 0 || pos[1] > bedH;
+    readout.textContent = [offBed ? "OFF BED" : "", source === "simulated" ? "SIMULATED" : ""].filter(Boolean).join("  ");
     readout.className = "mono small warn";
   }
 }
@@ -581,11 +584,6 @@ function drawGantry(upper, bottom, width) {
     `<rect x="${x - 13}" y="${y - 13}" width="26" height="26" fill="var(--ink)" stroke="var(--head)" stroke-width="2"/>`,
     `<path d="M${x - 5} ${y}H${x + 5}M${x} ${y - 5}V${y + 5}" stroke="var(--head)" stroke-width="2"/>`,
   ];
-  let label = `GANTRY ${gantryPos[0].toFixed(1)}, ${gantryPos[1].toFixed(1)}`;
-  if (clamped[0] !== gantryPos[0] || clamped[1] !== gantryPos[1]) label += "  (OFF BED)";
-  const rightSide = x < width - 200;
-  out.push(text(x + (rightSide ? 20 : -20), y - 4, label,
-    `text-anchor="${rightSide ? "start" : "end"}" font-size="10" font-weight="bold" fill="var(--ink)" ${MONO}`));
   return out.join("");
 }
 
