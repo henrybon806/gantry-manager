@@ -199,7 +199,7 @@
       <h2>BED &amp; SHELF</h2>
       <div class="row">
         <input type="text" id="bed-w" class="num"> × <input type="text" id="bed-h" class="num">
-        <span class="small">bed units (origin bottom-left)</span>
+        <span class="small">mm (0, 0 is bottom-left)</span>
       </div>
       <div class="row">
         <input type="text" id="shelf-slots" class="num" style="width:48px">
@@ -541,7 +541,7 @@ function applySnapshot(snap) {
 
 function bedSize() {
   const [w, h] = presets.bed;
-  return w > 0 && h > 0 ? [w, h] : [100, 60];
+  return w > 0 && h > 0 ? [w, h] : [3000, 1000];
 }
 function toCanvas(x, y) { return [view.ox + x * view.scale, view.oy - y * view.scale]; }
 function toBed(cx, cy) { return [(cx - view.ox) / view.scale, (view.oy - cy) / view.scale]; }

@@ -9,11 +9,11 @@ Everything comes from data/presets.json (saved from the web GUI): the gantry
 node's address, home, move time, shelf location and slots, each station's node
 address and location, and the sample routes. Any flag overrides its preset:
 
-    python -m gantry --port 8200 --gantry 127.0.0.1:8100 --home 0,0 --shelf 10,30 \\
-        --node A=8001@35,45 --node B=8002@60,15 --node C=8003@85,40 \\
+    python -m gantry --port 8200 --gantry 127.0.0.1:8100 --home 0,0 --shelf 300,500 \\
+        --node A=8001@1050,750 --node B=8002@1800,250 --node C=8003@2550,650 \\
         --route A,B,C --route C,A --route B,C
 
-``@x,y`` is where each station sits on the bed. The gantry starts at its home,
+``@x,y`` is where each station sits on the bed, in mm from the bottom-left corner. The gantry starts at its home,
 its own spot, and travels to the shelf like any other location.
 
 The scheduler drives the nodes over HTTP (POST /start, POST /taken), sends the
@@ -49,7 +49,7 @@ from labnode.server import LOOPBACK_HOSTS, TOKEN_ENV
 TICK_SECONDS = 0.1
 DEFAULT_PORT = 8200
 DEFAULT_HOME = "0,0"
-DEFAULT_SHELF = "10,30"
+DEFAULT_SHELF = "300,500"
 
 
 def parse_point(text: str) -> Point:

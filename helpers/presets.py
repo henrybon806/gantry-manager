@@ -21,17 +21,19 @@ LAYOUT_PATH = DATA_DIR / "gantry_layout.json"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_ROUTES = ["A,B,C", "C,A", "B,C"]
 
+# Bed coordinates are millimetres, with (0, 0) at the bottom-left corner.
+DEFAULT_BED = [3000.0, 1000.0]
 DEFAULT_STATIONS = [
-    {"name": "shelf", "address": "", "x": 10.0, "y": 30.0},
-    {"name": "experiment_a", "address": f"{DEFAULT_HOST}:8001", "x": 35.0, "y": 45.0},
-    {"name": "experiment_b", "address": f"{DEFAULT_HOST}:8002", "x": 60.0, "y": 15.0},
-    {"name": "experiment_c", "address": f"{DEFAULT_HOST}:8003", "x": 85.0, "y": 40.0},
+    {"name": "shelf", "address": "", "x": 300.0, "y": 500.0},
+    {"name": "experiment_a", "address": f"{DEFAULT_HOST}:8001", "x": 1050.0, "y": 750.0},
+    {"name": "experiment_b", "address": f"{DEFAULT_HOST}:8002", "x": 1800.0, "y": 250.0},
+    {"name": "experiment_c", "address": f"{DEFAULT_HOST}:8003", "x": 2550.0, "y": 650.0},
 ]
 
 
 def default_presets() -> dict[str, Any]:
     return {
-        "bed": [100.0, 60.0],
+        "bed": list(DEFAULT_BED),
         "gantry_source": "simulator",
         "gantry_address": f"{DEFAULT_HOST}:8100",
         "scheduler_address": f"{DEFAULT_HOST}:8200",

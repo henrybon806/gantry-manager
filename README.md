@@ -170,8 +170,8 @@ elsewhere. `--gui-port` moves the GUI off 8080.
 below). Any flag overrides its preset, e.g.:
 
 ```bash
-.venv/bin/python main.py --gantry 127.0.0.1:8100 --home 0,0 --shelf 10,30 --slots 10 \
-    --node A=8001@35,45 --node B=8002@60,15 --node C=8003@85,40 \
+.venv/bin/python main.py --gantry 127.0.0.1:8100 --home 0,0 --shelf 300,500 --slots 10 \
+    --node A=8001@1050,750 --node B=8002@1800,250 --node C=8003@2550,650 \
     --route A,B,C --route C,A --route B,C --move-time 1
 ```
 
@@ -195,7 +195,7 @@ drives the nodes over HTTP (`POST /start`, `POST /taken`) on wall-clock time
 and serves its API under `/scheduler` on the GUI's port (on `--port`, default
 8200, with `--no-gui`).
 
-`@x,y` is where each station sits on the bed. The gantry has its own `--home`
+`@x,y` is where each station sits on the bed, in mm from the bottom-left corner. The gantry has its own `--home`
 spot, separate from the shelf: it starts there and travels to the shelf like
 any other location. Ask it where it is at any time:
 
@@ -313,7 +313,7 @@ it in the web GUI and press **Save presets**; `main.py` (and
 
 ```json
 {
-  "bed": [100.0, 60.0],
+  "bed": [3000.0, 1000.0],
   "gantry_source": "simulator",
   "gantry_address": "127.0.0.1:8100",
   "scheduler_address": "127.0.0.1:8200",
@@ -322,14 +322,15 @@ it in the web GUI and press **Save presets**; `main.py` (and
   "shelf_slots": 10,
   "calibration": {"home_raw": null, "home_bed": [0.0, 0.0], "scale": [1.0, 1.0]},
   "stations": [
-    {"name": "shelf", "address": "", "x": 10.0, "y": 30.0},
-    {"name": "experiment_a", "address": "127.0.0.1:8001", "x": 35.0, "y": 45.0}
+    {"name": "shelf", "address": "", "x": 300.0, "y": 500.0},
+    {"name": "experiment_a", "address": "127.0.0.1:8001", "x": 1050.0, "y": 750.0}
   ],
   "routes": ["A,B,C", "C,A", "B,C"]
 }
 ```
 
-- Positions are bed coordinates, as the GUI shows them. The scheduler
+- The bed is 3000 × 1000 mm by default. Positions are bed coordinates in mm,
+  with (0, 0) at the bottom-left corner, as the GUI shows them. The scheduler
   converts them to gantry coordinates through the saved calibration.
 - `gantry_address` is the gantry node the scheduler sends move, pick and place
   to; empty means the gantry is only simulated.

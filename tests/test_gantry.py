@@ -451,7 +451,7 @@ class WebGuiTests(unittest.TestCase):
         presets["bed"] = [50, 50]
         self.client.put("/api/presets", json=presets)
         reloaded = self.client.post("/api/presets/reload").json()
-        self.assertEqual(reloaded["presets"]["bed"], [100.0, 60.0])
+        self.assertEqual(reloaded["presets"]["bed"], [3000.0, 1000.0])
         self.assertFalse(reloaded["unsaved"])
 
         for bad in ({"bed": [0, 10]}, {"shelf_slots": 0}, {"shelf_slots": 1, "routes": ["A", "B"]},
@@ -478,8 +478,8 @@ class WebGuiTests(unittest.TestCase):
         settings = settings_from_presets(presets)
 
         self.assertEqual(settings["gantry"], "127.0.0.1:8123")
-        # Bed (35, 45) through the calibration: raw = 100 + bed / 0.5.
-        self.assertEqual(settings["nodes"][0], ("experiment_a", "127.0.0.1:8001", (170.0, 190.0)))
+        # Bed (1050, 750) through the calibration: raw = 100 + bed / 0.5.
+        self.assertEqual(settings["nodes"][0], ("experiment_a", "127.0.0.1:8001", (2200.0, 1600.0)))
         manager = build_manager(**settings)
         self.addCleanup(manager.gantry.close)
         self.assertEqual(manager.gantry.address, "http://127.0.0.1:8123")
