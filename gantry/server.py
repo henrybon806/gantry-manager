@@ -31,6 +31,7 @@ serves its own state on --port (default 8200):
     GET /status    short summary
 
     GET    /shelf               every slot: empty, or its substrate and what it is doing
+    GET    /plan                the current move, each instrument's sample, and the upcoming moves
     POST   /substrates          {"route": ["A", "B"], "id": opt, "slot": opt, "metadata": opt}
     DELETE /shelf/{slot}        clear one slot (its substrate leaves the queue and the view)
     DELETE /shelf               clear every slot whose substrate is on the shelf
@@ -211,6 +212,10 @@ class Scheduler:
         with self.lock:
             return self.manager.shelf()
 
+    def plan(self) -> dict[str, Any]:
+        with self.lock:
+            return self.manager.plan()
+
     def add_substrate(self, spec: SubstrateSpec) -> dict[str, Any]:
         with self.lock:
             substrate = self._substrate(spec)
@@ -329,6 +334,10 @@ def create_app(scheduler: Scheduler, token: Optional[str] = None):
     @app.get("/shelf", summary="Every shelf slot: empty, or its substrate and what it is doing")
     def get_shelf() -> dict[str, Any]:
         return scheduler.shelf()
+
+    @app.get("/plan", summary="What the scheduler is doing now, what each instrument holds, and what it plans next")
+    def get_plan() -> dict[str, Any]:
+        return scheduler.plan()
 
     @app.post("/substrates", status_code=201, dependencies=[Depends(authorize)],
               summary="Add a substrate to a slot (or the first free one); it runs as soon as it can")

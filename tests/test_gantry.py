@@ -470,6 +470,33 @@ class GantrySimulationTests(unittest.TestCase):
         self.assertEqual((everything["cleared"], everything["kept"]), ([1, 3], [2]))
         self.assertIn("substrate_cleared", [event[1] for event in manager.events])
 
+    def test_plan_shows_current_move_and_what_comes_next(self):
+        client = ExperimentClient("experiment_a", duration=2.0)
+        locations = {"home": (0.0, 0.0), "shelf": (10.0, 0.0), "experiment_a": (30.0, 0.0)}
+        manager = GantryManager([client], [Substrate("s1", ("experiment_a",)), Substrate("s2", ("experiment_a",))],
+                                movement_time=1.0, locations=locations)
+        manager.tick(0.0)
+        plan = manager.plan()
+        self.assertEqual((plan["current"]["id"], plan["current"]["phase"], plan["current"]["to"]), ("s1", "pickup", "experiment_a"))
+        # s2 would go to the instrument s1 is about to fill, so it waits.
+        self.assertEqual([(u["id"], u["next"]) for u in plan["upcoming"]], [("s2", False)])
+        self.assertIn("about to get s1", plan["upcoming"][0]["blocked"])
+
+        manager.tick(1.0)  # picked up from the shelf
+        manager.tick(2.0)  # s1 placed in experiment_a
+        plan = manager.plan()
+        self.assertIsNone(plan["current"])
+        self.assertEqual(plan["instruments"], [{"name": "experiment_a", "sample_id": "s1", "waiting_for_pickup": False}])
+        self.assertIn("has s1", plan["upcoming"][0]["blocked"])
+        self.assertEqual(plan["recent"][0]["text"], "Placed s1 in experiment_a")
+
+        manager.tick(4.0)  # experiment_a finished; the gantry heads off to collect s1
+        self.assertEqual(manager.plan()["current"]["id"], "s1")
+        manager.emergency_stop()
+        plan = manager.plan()
+        self.assertEqual((plan["state"], plan["recent"][0]["text"]), ("stopped", "EMERGENCY STOP"))
+        self.assertFalse(any(u["next"] for u in plan["upcoming"]))
+
     def test_stop_halts_stops_busy_nodes_and_resumes(self):
         from fastapi.testclient import TestClient
 
@@ -698,6 +725,8 @@ class WebGuiTests(unittest.TestCase):
             self.assertEqual(snap["gantry"]["payload"]["z"], 0.0)
             self.assertIn("substrates", client.get("/scheduler/state").json())
             self.assertEqual(snap["shelf"]["shelf"][0]["substrate"]["id"], "sample_1")
+            self.assertIn("upcoming", snap["plan"])
+            self.assertIn("upcoming", client.get("/scheduler/plan").json())
 
             # The page adds and clears substrates through the GUI server.
             added = client.post("/api/substrates", json={"route": ["A"], "slot": 5}).json()

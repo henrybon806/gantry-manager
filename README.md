@@ -254,6 +254,9 @@ curl -X POST $S/substrates -H 'content-type: application/json' \
 curl -X POST $S/substrates -H 'content-type: application/json' \
   -d '{"id": "wafer_12", "route": "C,A", "slot": 4, "metadata": {"notes": "batch 3"}}'
 
+# What it is doing and plans next: current move, instruments, upcoming moves, recent events.
+curl $S/plan
+
 # Every slot: null when empty, else the substrate and its status
 # (queued, waiting, moving, in experiment, done). Also state: idle, running or stopped.
 curl $S/shelf
@@ -342,7 +345,10 @@ one) to pick experiments in order and add a substrate. A filled slot shows
 the substrate's id, what it's doing, and its route with finished steps in
 green and the current one in red. ✕ clears a slot, *Clear shelf* clears every
 slot on the shelf, and *Emergency stop* / *Resume* stop and restart
-scheduling. *API docs* in the header opens the scheduler's `/docs`. Settings
+scheduling. The **Scheduler** card (with the settings) shows what the gantry is doing
+now, what each instrument holds, the upcoming moves in the order the scheduler
+will take them (each with what it is waiting for), and recent events; the same
+data is at `GET /scheduler/plan`. *API docs* in the header opens the scheduler's `/docs`. Settings
 are in cards below, and durations come from each node.
 
 - **Gantry**: the gantry node's address (empty to only simulate the gantry),

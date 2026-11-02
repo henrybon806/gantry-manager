@@ -113,6 +113,14 @@ class PresetsStore:
             return {"problem": f"{label}: {detail}"}
         return payload
 
+    def plan(self) -> Optional[dict[str, Any]]:
+        """The scheduler's plan, or None when it cannot be read (the shelf says why)."""
+        if self.scheduler is not None:
+            return self.scheduler.plan()
+        address = self.get()["scheduler_address"]
+        payload, problem, _ = fetch(address, "/plan") if address else (None, "x", "")
+        return None if problem else payload
+
     def shelf_action(self, method: str, path: str, body: Any = None) -> dict[str, Any]:
         """Add, clear, stop or resume on the scheduler; ``{"ok", "message", "result"}`` for the page."""
         if self.scheduler is not None:
@@ -290,6 +298,7 @@ def create_app(store: PresetsStore):
             "gantry": {"payload": payload, "problem": problem, "detail": detail},
             "gantry_link": store.gantry_link(),
             "shelf": store.shelf(),
+            "plan": store.plan(),
             "unsaved": store.unsaved,
         }
 

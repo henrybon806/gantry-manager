@@ -75,6 +75,44 @@ def parse_route(text: str, known: set[str]) -> tuple[str, ...]:
     return route
 
 
+def describe_event(kind: str, detail: str) -> str:
+    """One scheduler event as a short sentence for the GUI."""
+    try:
+        if kind == "gantry_departed":
+            route, sample = detail.rsplit(":", 1)
+            source, destination = route.split("->")
+            return f"Gantry went to pick {sample} from {source} for {destination}"
+        if kind == "gantry_picked_up":
+            return f"Picked up {detail}"
+        if kind == "gantry_delivered":
+            sample, destination = detail.split("->")
+            return f"Placed {sample} in {destination}"
+        if kind == "client_finished":
+            client, sample, _ = detail.split(":")
+            return f"{client} finished {sample}"
+        if kind == "substrate_added":
+            where, route = detail.split(":", 1)
+            sample, slot = where.rsplit("@", 1)
+            return f"Added {sample} to slot {slot} ({route})"
+        if kind == "substrate_cleared":
+            sample, slot = detail.rsplit("@", 1)
+            return f"Cleared slot {slot} ({sample})"
+    except ValueError:
+        pass
+    labels = {
+        "scheduler_stopped": "EMERGENCY STOP",
+        "scheduler_resumed": "Resumed",
+        "gantry_manual_move": "Manual move to",
+        "gantry_manual_arrived": "Manual move arrived at",
+        "delivery_failed": "Delivery failed:",
+        "taken_failed": "Pickup not confirmed:",
+        "node_stopped": "Stopped",
+        "node_stop_failed": "Stop failed:",
+    }
+    label = labels.get(kind, kind.replace("_", " "))
+    return f"{label} {detail}".strip() if kind != "scheduler_stopped" else label
+
+
 @dataclass
 class ExperimentClient:
     """A simulated experiment that can process one substrate at a time."""
@@ -697,34 +735,125 @@ class GantryManager:
                     self._waiting[substrate.substrate_id] = (substrate, client.name)
                     self.events.append((self.now, "client_finished", f"{client.name}:{substrate.substrate_id}:{self.gantry_busy}"))
 
-    def _schedule_next_transport(self) -> None:
-        for substrate_id, (substrate, source) in self._waiting.items():
+    def _next_choice(
+        self, exclude: Optional[Substrate] = None, reserved: frozenset[str] = frozenset()
+    ) -> Optional[tuple[Substrate, str, str]]:
+        """``(substrate, source, destination)`` the gantry would carry next, or None.
+
+        The one place the order is decided, for scheduling and for the plan the
+        GUI shows. ``exclude`` (the sample being carried) is skipped and
+        ``reserved`` stations (where it is going) count as busy.
+        """
+        def free(name: str) -> bool:
+            return name == "shelf" or (not self.clients[name].busy and name not in reserved)
+
+        waiting = [(substrate, source) for substrate, source in self._waiting.values() if substrate is not exclude]
+        for substrate, source in waiting:
             destination = substrate.next_experiment or "shelf"
-            if destination == "shelf" or not self.clients[destination].busy:
-                self._begin_transport(substrate, source, destination, "pickup")
-                return
-
+            if free(destination):
+                return substrate, source, destination
         # Break cycles where every finished sample's next client is occupied.
-        blocked = next(
-            (
-                (substrate, source)
-                for substrate, source in self._waiting.values()
-                if source != "shelf"
-            ),
-            None,
-        )
-        if blocked is not None:
-            substrate, source = blocked
-            self._begin_transport(substrate, source, "shelf", "pickup")
-            return
-
+        for substrate, source in waiting:
+            if source != "shelf":
+                return substrate, source, "shelf"
         for substrate in self.substrates:
             destination = substrate.next_experiment
-            if substrate.location != "shelf" or destination is None:
+            if substrate is exclude or substrate.location != "shelf" or destination is None:
                 continue
-            if not self.clients[destination].busy:
-                self._begin_transport(substrate, "shelf", destination, "pickup")
-                return
+            if free(destination):
+                return substrate, "shelf", destination
+        return None
+
+    def _schedule_next_transport(self) -> None:
+        choice = self._next_choice()
+        if choice is not None:
+            self._begin_transport(*choice, "pickup")
+
+    def plan(self, event_limit: int = 12) -> dict[str, Any]:
+        """What the scheduler is doing and plans to do, for the GUI and GET /plan.
+
+        ``upcoming`` lists every substrate waiting for the gantry in the order
+        it will be considered; ``next`` marks the one it takes when the
+        current move ends (or now, if the gantry is free), assuming nothing
+        else finishes first.
+        """
+        transport = self._transport
+        current = None
+        if transport is not None:
+            current = {
+                "kind": "transport",
+                "id": transport.substrate.substrate_id,
+                "slot": transport.substrate.slot,
+                "phase": transport.phase,
+                "from": transport.source,
+                "to": transport.destination,
+                "remaining": max(0.0, transport.arrives_at - self.now),
+            }
+        elif self._manual_move is not None:
+            current = {"kind": "manual", "to": list(self._manual_move.end),
+                       "remaining": max(0.0, self._manual_move.arrives_at - self.now)}
+        exclude = transport.substrate if transport is not None else None
+        reserved = frozenset({transport.destination}) if transport is not None else frozenset()
+        choice = None if self.stopped else self._next_choice(exclude, reserved)
+
+        def busy_reason(name: str) -> Optional[str]:
+            if name == "shelf":
+                return None
+            client = self.clients[name]
+            if name in reserved:
+                return f"{name} is about to get {exclude.substrate_id}"
+            if client.substrate is not None:
+                return f"{name} has {client.substrate.substrate_id}"
+            if client.busy:
+                state = getattr(client, "status", {}).get("state", "busy")
+                return f"{name} is {state}"
+            return None
+
+        upcoming = []
+        candidates = [(substrate, source) for substrate, source in self._waiting.values() if substrate is not exclude]
+        candidates += [
+            (substrate, "shelf") for substrate in self.substrates
+            if substrate is not exclude and substrate.location == "shelf"
+            and substrate.next_experiment is not None and substrate.substrate_id not in self._waiting
+        ]
+        for substrate, source in candidates:
+            destination = substrate.next_experiment or "shelf"
+            is_next = choice is not None and choice[0] is substrate
+            if is_next:
+                destination = choice[2]
+            reason = None if is_next else busy_reason(destination)
+            if is_next and destination == "shelf" and substrate.next_experiment is not None:
+                reason = f"parked on the shelf: {busy_reason(substrate.next_experiment)}"
+            upcoming.append({
+                "id": substrate.substrate_id,
+                "slot": substrate.slot,
+                "from": source,
+                "to": destination,
+                "next": is_next,
+                "blocked": reason if not is_next else None,
+                "note": reason if is_next else None,
+                "remaining_steps": len(substrate.experiment_order) - substrate.current_experiment_index,
+            })
+        upcoming.sort(key=lambda item: not item["next"])
+        instruments = [
+            {
+                "name": name,
+                "sample_id": client.substrate.substrate_id if client.substrate else None,
+                "waiting_for_pickup": client.substrate is not None and client.substrate.substrate_id in self._waiting,
+            }
+            for name, client in self.clients.items()
+        ]
+        return {
+            "state": self.state,
+            "now": self.now,
+            "current": current,
+            "instruments": instruments,
+            "upcoming": upcoming,
+            "recent": [
+                {"t": t, "kind": kind, "text": describe_event(kind, detail)}
+                for t, kind, detail in reversed(self.events[-event_limit:])
+            ],
+        }
 
     def _begin_transport(
         self, substrate: Substrate, source: str, destination: str, phase: str

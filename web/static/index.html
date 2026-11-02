@@ -60,6 +60,8 @@
     gap: 14px;
     margin-top: 14px;
     align-items: start;
+    /* The scheduler card is last in the markup and fills the first gap the others leave. */
+    grid-auto-flow: dense;
   }
   section { background: var(--card); border: 1px solid var(--line); padding: 10px 12px; }
   h2 { margin: 0 0 2px; font-size: 12px; letter-spacing: 0.05em; color: var(--heading); }
@@ -166,6 +168,30 @@
   .progress { height: 4px; background: var(--grid); border-radius: 2px; overflow: hidden; }
   .progress span { display: block; height: 100%; background: var(--ok); }
   .slot.done .progress span { background: var(--done); }
+
+  /* --------------------------------------------------- scheduler card */
+  #scheduler-card .head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+  #scheduler-card h3 { margin: 10px 0 4px; font-size: 10px; letter-spacing: 0.06em; color: var(--muted); }
+  #scheduler-card ol, #scheduler-card ul { list-style: none; margin: 0; padding: 0; }
+  #plan-now { font: 12px Menlo, monospace; color: var(--ink); padding: 6px 8px; border-radius: 4px; background: var(--bed); border-left: 3px solid var(--faint); }
+  #plan-now.active { border-left-color: var(--busy); }
+  #plan-now .sub { color: var(--muted); font-size: 11px; }
+  .inst { display: flex; gap: 8px; align-items: baseline; font: 11px Menlo, monospace; padding: 2px 0; }
+  .inst b { width: 52px; color: var(--ink); }
+  .inst .what { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex: none; align-self: center; }
+  #plan-upcoming { max-height: 168px; overflow-y: auto; counter-reset: up; }
+  #plan-upcoming li { counter-increment: up; display: grid; grid-template-columns: 18px 1fr; gap: 0 4px; font: 11px Menlo, monospace; padding: 3px 0; border-top: 1px solid var(--grid); }
+  #plan-upcoming li:first-child { border-top: 0; }
+  #plan-upcoming li::before { content: counter(up); color: var(--faint); text-align: right; }
+  #plan-upcoming .move { color: var(--ink); }
+  #plan-upcoming .why { grid-column: 2; color: var(--muted); font-size: 10px; }
+  #plan-upcoming li.next .move::after { content: "NEXT"; margin-left: 6px; font-size: 9px; font-weight: bold; color: #fff; background: var(--ok); padding: 0 4px; border-radius: 3px; }
+  #plan-recent { max-height: 132px; overflow-y: auto; }
+  #plan-recent li { display: flex; gap: 8px; font-size: 11px; padding: 1px 0; }
+  #plan-recent .ago { font: 10px Menlo, monospace; color: var(--faint); width: 44px; flex: none; text-align: right; }
+  #plan-recent li.alarm { color: var(--bad); font-weight: bold; }
+  .muted-line { color: var(--faint); font-size: 11px; font-style: italic; }
 
   /* ------------------------------------------------------- add dialog */
   dialog { border: 1px solid var(--line); border-radius: 8px; padding: 16px 18px; width: min(440px, calc(100vw - 32px)); background: var(--card); color: var(--text); }
@@ -298,6 +324,20 @@
         <input type="text" id="new-name" class="grow" spellcheck="false">
         <button type="submit">Add experiment</button>
       </form>
+    </section>
+
+    <section id="scheduler-card">
+      <div class="head">
+        <h2 style="margin:0">SCHEDULER</h2>
+        <span id="plan-state" class="badge">--</span>
+      </div>
+      <div id="plan-now">--</div>
+      <h3>INSTRUMENTS</h3>
+      <ul id="plan-instruments"></ul>
+      <h3>UP NEXT</h3>
+      <ol id="plan-upcoming"></ol>
+      <h3>RECENT</h3>
+      <ul id="plan-recent"></ul>
     </section>
   </div>
 </main>
@@ -490,6 +530,7 @@ async function poll() {
     const snap = await response.json();
     applySnapshot(snap);
     showGantryLink(snap.gantry_link);
+    renderPlan(snap.plan);
     renderShelf("shelf" in snap ? snap.shelf
       : { problem: "This GUI server is older than the page and sends no shelf: restart python main.py" });
     if (snap.unsaved !== unsaved && !saveTimer) { unsaved = snap.unsaved; showPresetsStatus(); }
@@ -498,6 +539,7 @@ async function poll() {
     lastPollOk = false;
     statuses = {};
     renderShelf({ problem: "GUI server not running (python main.py)" });
+    renderPlan(null);
     setGantry(null, "GUI SERVER DOWN", "GUI server not running (python main.py)", null, false, null);
   }
   $("live").textContent = lastPollOk ? "LIVE" : "GUI SERVER DOWN";
@@ -1051,6 +1093,78 @@ $("stop-resume").addEventListener("click", async () => {
   const reply = await shelfAction("POST", resume ? "/api/resume" : "/api/stop");
   setShelfMessage(reply.ok ? (resume ? "Resumed" : "EMERGENCY STOP sent") : reply.message, reply.ok ? (resume ? "good" : "bad") : "bad");
 });
+
+// ----------------------------------------------------------- scheduler
+
+let planKey = "";
+
+function place(name) { return name === "shelf" ? "SHELF" : stationLabel(name); }
+// "experiment_b is busy" -> "EXP B is busy", "shelf" -> "SHELF".
+function prettyNames(textContent) {
+  return textContent.replace(/\bexperiment_([a-z0-9]+)/gi, (m, l) => `EXP ${l.toUpperCase()}`).replace(/\bshelf\b/g, "SHELF");
+}
+function ago(seconds) {
+  if (seconds < 1) return "now";
+  if (seconds < 60) return `${Math.floor(seconds)}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+  return `${Math.floor(seconds / 3600)}h`;
+}
+
+function renderPlan(plan) {
+  const key = JSON.stringify([plan, plan ? plan.instruments.map((i) => statuses[i.name]) : null]);
+  if (key === planKey) return;
+  planKey = key;
+  const badge = $("plan-state");
+  const now = $("plan-now");
+  if (!plan) {
+    badge.textContent = "OFFLINE";
+    badge.className = "badge stopped";
+    now.textContent = "Scheduler not readable (see the shelf above)";
+    now.className = "";
+    for (const id of ["plan-instruments", "plan-upcoming", "plan-recent"]) $(id).innerHTML = "";
+    return;
+  }
+  badge.textContent = plan.state.toUpperCase();
+  badge.className = `badge ${plan.state}`;
+
+  const c = plan.current;
+  if (c && c.kind === "transport") {
+    const doing = c.phase === "pickup"
+      ? `Picking up <b>${esc(c.id)}</b> at ${esc(place(c.from))}`
+      : `Carrying <b>${esc(c.id)}</b> to ${esc(place(c.to))}`;
+    now.innerHTML = `${doing}<div class="sub">${esc(place(c.from))} → ${esc(place(c.to))}` +
+      `${c.remaining > 0.05 ? ` · ~${c.remaining.toFixed(1)}s` : " · waiting for gantry"}</div>`;
+    now.className = "active";
+  } else if (c && c.kind === "manual") {
+    now.innerHTML = `Manual move to (${c.to.map((v) => fmt(v)).join(", ")})`;
+    now.className = "active";
+  } else {
+    now.innerHTML = plan.state === "stopped" ? '<b style="color:var(--bad)">Stopped</b>: press Resume to carry on'
+      : plan.upcoming.length ? "Gantry idle: waiting for an instrument" : "Gantry idle: nothing to do";
+    now.className = "";
+  }
+
+  $("plan-instruments").innerHTML = plan.instruments.map((inst) => {
+    const status = statuses[inst.name] || { state: NOT_STARTED };
+    const color = COLORS[status.state] || "var(--faint)";
+    let what = inst.sample_id ? esc(inst.sample_id) : '<span style="color:var(--faint)">free</span>';
+    if (inst.sample_id && status.state === "busy" && typeof status.remaining === "number") what += ` · ${status.remaining.toFixed(0)}s left`;
+    if (inst.waiting_for_pickup) what += " · waiting for pickup";
+    return `<li class="inst"><span class="dot" style="background:${color}"></span><b>${esc(stationLabel(inst.name))}</b>` +
+      `<span class="what">${what}</span><span style="color:${color}">${esc(problemLabel(status.state))}</span></li>`;
+  }).join("");
+
+  $("plan-upcoming").innerHTML = plan.upcoming.length ? plan.upcoming.map((u) => {
+    const why = u.blocked ? `waits: ${u.blocked}` : u.note || (u.next && c ? "when the current move ends" : "");
+    return `<li class="${u.next ? "next" : ""}"><span class="move">${esc(u.id)} <span style="color:var(--faint)">#${u.slot}</span> ` +
+      `${esc(place(u.from))} → ${esc(place(u.to))}</span>${why ? `<span class="why">${esc(prettyNames(why))}</span>` : ""}</li>`;
+  }).join("") : '<li class="muted-line" style="display:block">Nothing waiting for the gantry</li>';
+
+  $("plan-recent").innerHTML = plan.recent.length ? plan.recent.map((e) =>
+    `<li class="${["scheduler_stopped", "delivery_failed", "taken_failed", "node_stop_failed"].includes(e.kind) ? "alarm" : ""}">` +
+    `<span class="ago">${ago(plan.now - e.t)}</span><span>${esc(prettyNames(e.text))}</span></li>`).join("")
+    : '<li class="muted-line">No events yet</li>';
+}
 
 // --------------------------------------------------------------- start
 
