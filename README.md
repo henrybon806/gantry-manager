@@ -44,8 +44,8 @@ The scheduler advances by event time instead of real wall-clock sleep, which kee
 ### Single gantry occupancy
 The gantry can only do one movement at a time. It does not overlap deliveries or pickups, and it cannot immediately process a sample that is still leaving or arriving at a busy station.
 
-### Fixed travel time
-Movement is a constant, fixed duration so the gantry's travel timing is realistic and consistent across all operations.
+### Travel time
+With a gantry node, each leg takes as long as the real gantry does. Without one, every leg takes the fixed `move_time`.
 
 ### Substrate tracking
 Each sample is represented by a `Substrate` object with:
@@ -79,7 +79,7 @@ helpers/           shared code
 sim/               fake hardware for running without a lab, one terminal each
   experiment_a.py …  fake experiment nodes with a fixed name, port and duration
   node.py            generic fake node (letter, port, duration as arguments)
-  fake_gantry.py     fake gantry node (:8100): receives move, pick and place and prints them
+  fake_gantry.py     minimal gantry node (:8100): prints pick and place; ../sim/gantry travels like the real one
 tests/             unit and end-to-end tests
 legacy/            the old Tkinter GUI and the timer prototype, kept for reference
 data/              your settings
@@ -148,14 +148,22 @@ Then open one terminal per process, in any order:
 .venv/bin/python main.py                 # terminal 5: scheduler + GUI, then open http://127.0.0.1:8080
 ```
 
-The scheduler times every gantry leg itself (`move_time`) and, as it goes,
-sends the gantry node at `gantry_address` (default `127.0.0.1:8100`) a `move`
-to each station, then `pick` or `place` there. It assumes each command worked
-and carries on; commands go out in order on their own thread, each waiting for
-the gantry to finish the last. If the gantry rejects one or is not running, the
-GUI shows it under the gantry readout (e.g. *move not available: gantry NOT
-STARTED*) and the terminal prints it once. Clear the gantry address (or pass
-`--gantry ""`) to only simulate the gantry.
+The scheduler tells the gantry node at `gantry_address` (default
+`127.0.0.1:8100`) where to go by name, never by coordinates. Each trip is a
+`pick` at the source, then a `place` at the destination, with
+`{"station", "sample_id"}` plus `"slot"` on the shelf; every sample keeps one
+shelf slot until it is cleared. The gantry node owns the coordinates and
+finds its own way, like Gantry-Communication's `pickupNamed`/`dropoffNamed`.
+
+Each leg lasts as long as the gantry takes, and at least `move_time`. An
+instrument gets `POST /taken` only after the gantry has finished picking from
+it, and `POST /start` only after it has finished placing in it, so nothing is
+loaded into or taken out of a busy instrument. If the gantry rejects a command,
+fails one, or is not running, the scheduler carries on as if the command
+worked. The GUI shows the problem under the gantry readout (e.g. *pick not
+available: gantry NOT STARTED*) and the terminal prints it once. Clear the
+gantry address (or pass `--gantry ""`) to only simulate the gantry, with every
+leg taking `move_time`.
 
 The gantry position the GUI draws is always the one the gantry node reports
 (the scheduler listens to its `/status`), never an estimate. If the node cannot
@@ -190,10 +198,9 @@ addresses in `data/presets.json` (or pass `--node`).
 The real gantry is a `Gantry` node in lab-devices (`templates/gantry/`); point
 `gantry_address` at it instead of the fake one.
 
-`main.py` with no arguments uses exactly those nodes and routes. It
-drives the nodes over HTTP (`POST /start`, `POST /taken`) on wall-clock time
-and serves its API under `/scheduler` on the GUI's port (on `--port`, default
-8200, with `--no-gui`).
+`main.py` drives the nodes over HTTP (`POST /start`, `POST /taken`) on
+wall-clock time and serves its API under `/scheduler` on the GUI's port, 8080
+(on `--port`, default 8200, with `--no-gui`).
 
 `@x,y` is where each station sits on the bed, in mm from the bottom-left corner. The gantry has its own `--home`
 spot, separate from the shelf: it starts there and travels to the shelf like
@@ -204,7 +211,7 @@ curl http://127.0.0.1:8080/scheduler/pos
 # {"x": 21.2, "y": 36.7, "z": 0.0, "moving": true, "at": null}
 ```
 
-Move it while it is stopped (this takes the normal move time; it answers 409
+Move it while it is stopped (it lasts as long as the gantry takes; it answers 409
 while the gantry is moving, and needs `Authorization: Bearer $LABNODE_TOKEN`
 when a token is set):
 
@@ -229,6 +236,62 @@ read is labelled:
 - **UNABLE TO READ**: something answered, but not with a valid status or state
 
 The reason (for example `Connection refused`) is shown under the gantry source.
+
+## Shelf and substrates
+
+The scheduler is always on: it never finishes and needs no start. Whenever a
+substrate arrives, send it to `POST /substrates` with its route; it goes into
+a numbered shelf slot and runs as soon as its next instrument is free.
+`--route` on the command line adds some at startup, but you don't need to.
+
+```bash
+S=http://127.0.0.1:8080/scheduler
+
+# Add a substrate. Route: letters or station names, a list or "A,B,C".
+# Without "slot" it takes the first free one; without "id" it gets the next free sample_N.
+curl -X POST $S/substrates -H 'content-type: application/json' \
+  -d '{"route": ["A", "B", "C"]}'
+curl -X POST $S/substrates -H 'content-type: application/json' \
+  -d '{"id": "wafer_12", "route": "C,A", "slot": 4, "metadata": {"notes": "batch 3"}}'
+
+# Every slot: null when empty, else the substrate and its status
+# (queued, waiting, moving, in experiment, done). Also state: idle, running or stopped.
+curl $S/shelf
+
+# Clear one slot, or every slot whose substrate is on the shelf. A cleared
+# substrate leaves the queue and the shelf view.
+curl -X DELETE $S/shelf/4
+curl -X DELETE $S/shelf
+
+# Emergency stop, and carry on afterwards.
+curl -X POST $S/stop
+curl -X POST $S/resume
+```
+
+Interactive docs for all of it are at http://127.0.0.1:8080/scheduler/docs
+(the GUI's own API is at http://127.0.0.1:8080/docs; with `--no-gui`, the
+scheduler's docs are at `/docs` on `--port`).
+
+Slots are numbered from 1 in the API and GUI. A substrate keeps its slot from
+when it's added until it's cleared, including while it's out at an
+instrument. The gantry's `slot` parameter in pick/place numbers them from 0.
+A finished substrate stays in its slot, marked done, until you clear it.
+
+Refusals: a taken or out-of-range slot, a full shelf, a duplicate id or an
+unknown experiment get 422. Clearing a slot whose substrate is at an
+instrument or on the gantry gets 409 while the scheduler runs.
+
+**Stop is an emergency stop.** The scheduler stops scheduling at once and
+abandons the current gantry move. It sends `/stop` to the gantry (ahead of any
+queued commands) and to every instrument holding a sample. Samples stay where
+they are. You can still add substrates (they wait) and clear any slot (after
+taking that substrate out by hand). `POST /resume` carries on. A substrate left
+in a stopped instrument is collected once that node reports stopped or done.
+One that was on the gantry is assumed to be back in its shelf slot, so put
+it there before resuming.
+
+With `LABNODE_TOKEN` set, the POST and DELETE endpoints need
+`Authorization: Bearer $LABNODE_TOKEN`.
 
 ## Run the tests
 
@@ -273,9 +336,14 @@ cannot read the nodes directly) and forwards moves to the gantry.
 
 The page shows the bed full width at its real shape (3000 × 1000 mm by
 default), with the live gantry and each experiment's state, and the gantry's
-X, Y and Z right under it. Settings are in cards below. It has no run
-controls: sample routes come from `presets.json` (`"routes"`) or `--route`
-for now, and durations from each node. Restart `main.py` to run a new batch.
+X, Y and Z right under it. Below that is the **shelf**: one card per slot.
+An empty slot is dashed; click it (or *+ Add substrate* for the next free
+one) to pick experiments in order and add a substrate. A filled slot shows
+the substrate's id, what it's doing, and its route with finished steps in
+green and the current one in red. ✕ clears a slot, *Clear shelf* clears every
+slot on the shelf, and *Emergency stop* / *Resume* stop and restart
+scheduling. *API docs* in the header opens the scheduler's `/docs`. Settings
+are in cards below, and durations come from each node.
 
 - **Gantry**: the gantry node's address (empty to only simulate the gantry),
   the last command's result, its home spot and the move time.
@@ -315,21 +383,20 @@ it in the web GUI and press **Save presets**; `main.py` (and
   "stations": [
     {"name": "shelf", "address": "", "x": 300.0, "y": 500.0},
     {"name": "experiment_a", "address": "127.0.0.1:8001", "x": 1050.0, "y": 750.0}
-  ],
-  "routes": ["A,B,C", "C,A", "B,C"]
+  ]
 }
 ```
 
 - The bed is 3000 × 1000 mm by default. Positions are bed coordinates in mm,
   with (0, 0) at the bottom-left corner, as the GUI shows them. The scheduler
   converts them to gantry coordinates through the saved calibration.
-- `gantry_address` is the gantry node the scheduler sends move, pick and place
-  to; empty means the gantry is only simulated.
+- `gantry_address` is the gantry node the scheduler sends pick and place (by
+  station name) to; empty means the gantry is only simulated.
 - `scheduler_address` is only for `python -m web` on its own: where it finds a
   scheduler started with `--no-gui`.
 - Stations without a node address are drawn but not used by the gantry.
 - Route entries are letters (`A` → `experiment_a`) or station names.
-- The number of routes cannot exceed `shelf_slots` (at most 30).
+- Substrates and routes are not presets: they come through `POST /substrates`.
 - If there is no `data/presets.json` yet, the first run starts from an existing
   `data/gantry_layout.json`, so nothing you set up before is lost.
 - Experiment durations are not presets: each experiment decides its own run

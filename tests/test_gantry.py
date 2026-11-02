@@ -275,7 +275,7 @@ class GantrySimulationTests(unittest.TestCase):
         manager.tick(1.0)
         self.assertEqual(manager.pos(), {"x": 40.0, "y": 20.0, "z": 0.0, "moving": False, "at": None, **SIMULATED})
 
-        # A queued sample starts from the manual spot.
+        # A substrate added now leaves from the manual spot.
         manager.add_substrate(Substrate("sample_1", ("experiment_a",)))
         manager.tick(1.5)
         self.assertEqual(manager.coordinates(), (25.0, 10.0))
@@ -303,13 +303,13 @@ class GantrySimulationTests(unittest.TestCase):
         ok = locked.post("/pos", json={"x": 1, "y": 1}, headers={"Authorization": "Bearer secret"})
         self.assertEqual(ok.status_code, 202)
 
-    def test_gantry_gets_move_pick_and_place_in_order(self):
+    def test_gantry_is_told_where_to_pick_and_place_by_name(self):
         class Recorder:
             def __init__(self):
                 self.sent = []
 
             def send(self, command, **arguments):
-                self.sent.append((command, arguments.get("params", {}).get("to") or arguments["params"].get("station")))
+                self.sent.append((command, arguments["params"]))
 
         recorder = Recorder()
         client = ExperimentClient("experiment_a", duration=1.0)
@@ -317,10 +317,53 @@ class GantrySimulationTests(unittest.TestCase):
         manager = GantryManager([client], [Substrate("s1", ("experiment_a",))], movement_time=1.0,
                                 locations=locations, gantry=recorder)
         manager.run_until_complete()
+        shelf = {"station": "shelf", "sample_id": "s1", "slot": 0}
+        station = {"station": "experiment_a", "sample_id": "s1"}
         self.assertEqual(recorder.sent, [
-            ("move", "shelf"), ("pick", "shelf"), ("move", "experiment_a"), ("place", "experiment_a"),
-            ("move", "experiment_a"), ("pick", "experiment_a"), ("move", "shelf"), ("place", "shelf"),
+            ("pick", shelf), ("place", station), ("pick", station), ("place", shelf),
         ])
+
+    def test_instruments_wait_for_the_gantry_to_place_and_pick(self):
+        class SlowGantry:
+            """Finishes a command only when the test says so."""
+
+            def __init__(self):
+                self.sent = []
+                self.finished = 0
+
+            def send(self, command, **arguments):
+                self.sent.append(command)
+                return len(self.sent)
+
+            def done(self, ticket):
+                return ticket <= self.finished
+
+        gantry = SlowGantry()
+        client = ExperimentClient("experiment_a", duration=1.0)
+        locations = {"home": (0.0, 0.0), "shelf": (10.0, 20.0), "experiment_a": (30.0, 40.0)}
+        manager = GantryManager([client], [Substrate("s1", ("experiment_a",))], movement_time=1.0,
+                                locations=locations, gantry=gantry)
+        manager.tick(0.0)
+        manager.tick(5.0)  # well past movement_time, but the gantry has not picked yet
+        self.assertEqual(gantry.sent, ["pick"])
+        self.assertEqual(manager.transport_snapshot["phase"], "pickup")
+
+        gantry.finished = 1
+        manager.tick(6.0)
+        manager.tick(9.0)
+        self.assertEqual(gantry.sent, ["pick", "place"])
+        self.assertFalse(client.busy, "started before the gantry finished placing")
+        gantry.finished = 2
+        manager.tick(9.5)
+        self.assertTrue(client.busy)
+
+        manager.tick(11.0)  # the run is done; the gantry goes back for it
+        self.assertEqual(gantry.sent[-1], "pick")
+        manager.tick(15.0)
+        self.assertIs(client.substrate, manager.substrates[0], "released before the gantry finished picking")
+        gantry.finished = 3
+        manager.tick(15.5)
+        self.assertIsNone(client.substrate)
 
     def test_gantry_link_reports_commands_that_are_not_available(self):
         from gantry.link import GantryLink
@@ -376,6 +419,100 @@ class GantrySimulationTests(unittest.TestCase):
             link.close()
             server.should_exit = True
             thread.join(timeout=5)
+
+    def test_substrates_fill_slots_run_and_clear(self):
+        from fastapi.testclient import TestClient
+
+        clients = [ExperimentClient("experiment_a", duration=1.0), ExperimentClient("experiment_b", duration=1.0)]
+        locations = {"home": (0.0, 0.0), "shelf": (10.0, 0.0), "experiment_a": (30.0, 0.0), "experiment_b": (50.0, 0.0)}
+        manager = GantryManager(clients, [], movement_time=0.5, locations=locations, shelf_slots=3)
+        api = TestClient(create_app(Scheduler(manager)))
+
+        shelf = api.get("/shelf").json()
+        self.assertEqual((shelf["state"], shelf["slots"]), ("idle", 3))
+        self.assertEqual(shelf["shelf"], [{"slot": n, "substrate": None} for n in (1, 2, 3)])
+
+        # A chosen slot, then the first free one.
+        first = api.post("/substrates", json={"id": "s1", "route": ["A", "B"], "slot": 2, "metadata": {"ink": "x"}})
+        self.assertEqual(first.status_code, 201, first.text)
+        self.assertEqual((first.json()["slot"], first.json()["metadata"]), (2, {"ink": "x"}))
+        second = api.post("/substrates", json={"route": "B"}).json()
+        self.assertEqual((second["id"], second["slot"]), ("sample_1", 1))
+        self.assertEqual(api.get("/shelf").json()["state"], "running")
+
+        # A taken or missing slot, an unknown experiment and a duplicate id are refused.
+        for bad in ({"route": "A", "slot": 2}, {"route": "A", "slot": 4}, {"route": "Z"}, {"id": "s1", "route": "A"}):
+            self.assertEqual(api.post("/substrates", json=bad).status_code, 422, bad)
+        third = api.post("/substrates", json={"route": "A"}).json()
+        self.assertEqual(third["slot"], 3)
+        self.assertIn("full", api.post("/substrates", json={"route": "A"}).json()["detail"])
+
+        # Out at an instrument or on the gantry: not clearable while running.
+        manager.tick(manager.now)
+        busy = next(s for s in manager.substrates if s.location != "shelf" or s is manager._transport.substrate)
+        self.assertEqual(api.delete(f"/shelf/{busy.slot}").status_code, 409)
+        self.assertEqual(api.delete("/shelf/9").status_code, 422)
+
+        manager.run_until_complete()
+        manager.tick(manager.now)
+        shelf = api.get("/shelf").json()
+        self.assertEqual((shelf["state"], shelf["done"], shelf["total"]), ("idle", 3, 3))
+        self.assertEqual({slot["substrate"]["status"] for slot in shelf["shelf"]}, {"done"})
+        # Each substrate kept the slot it was added to.
+        self.assertEqual([s.slot for s in manager.substrates], [2, 1, 3])
+
+        # Clearing a done slot frees it for the next substrate; clearing the shelf frees the rest.
+        cleared = api.delete("/shelf/2").json()
+        self.assertIsNone(cleared["shelf"][1]["substrate"])
+        self.assertEqual(api.post("/substrates", json={"route": "A"}).json()["slot"], 2)
+        manager.tick(manager.now)
+        everything = api.delete("/shelf").json()
+        self.assertEqual((everything["cleared"], everything["kept"]), ([1, 3], [2]))
+        self.assertIn("substrate_cleared", [event[1] for event in manager.events])
+
+    def test_stop_halts_stops_busy_nodes_and_resumes(self):
+        from fastapi.testclient import TestClient
+
+        node = LiveNode("a", 30.0)
+        try:
+            manager = build_manager([f"A={node.address}@30,0"], None, movement_time=0.05)
+            scheduler = Scheduler(manager)
+            api = TestClient(create_app(scheduler))
+            scheduler.start()
+            try:
+                api.post("/substrates", json={"route": "A"})
+                api.post("/substrates", json={"route": "A"})
+                deadline = time.monotonic() + 5
+                while node.node.status()["state"] != "busy" and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                self.assertEqual(node.node.status()["state"], "busy")
+                self.assertEqual(api.post("/resume").status_code, 409)
+
+                stopped = api.post("/stop").json()
+                self.assertEqual(stopped["state"], "stopped")
+                deadline = time.monotonic() + 3
+                while node.node.status()["state"] == "busy" and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                self.assertIn(node.node.status()["state"], ("stopping", "stopped"))
+                # Nothing else is scheduled: the second substrate stays on the shelf.
+                time.sleep(0.3)
+                slots = [slot["substrate"] for slot in api.get("/shelf").json()["shelf"][:2]]
+                self.assertEqual([s["location"] for s in slots], ["experiment_a", "shelf"])
+                self.assertIn("node_stopped", [event[1] for event in scheduler.snapshot()["events"]])
+                self.assertEqual(api.post("/stop").status_code, 409)
+                # Substrates can still be added while stopped; they wait for resume.
+                self.assertEqual(api.post("/substrates", json={"route": "A"}).status_code, 201)
+
+                self.assertEqual(api.post("/resume").json()["state"], "running")
+                # The stopped node is collected, so the stopped sample comes back to the shelf.
+                deadline = time.monotonic() + 3
+                while api.get("/shelf").json()["shelf"][0]["substrate"]["location"] != "shelf" and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                self.assertEqual(api.get("/shelf").json()["shelf"][0]["substrate"]["status"], "done")
+            finally:
+                scheduler.stop()
+        finally:
+            node.close()
 
     def test_poller_reads_nodes_and_gantry_position(self):
         gantry = serve_text(b'{"x": 12.5, "y": 3.0, "z": 0}')
@@ -436,7 +573,6 @@ class WebGuiTests(unittest.TestCase):
         presets = reply["presets"]
         presets["stations"][1]["x"] = 12.5
         presets["shelf_slots"] = 4
-        presets["routes"] = ["A", "B,A"]
         edited = self.client.put("/api/presets", json=presets).json()
         self.assertTrue(edited["unsaved"])
         self.assertFalse(self.presets_path.exists())  # edits are not written until Save
@@ -445,7 +581,8 @@ class WebGuiTests(unittest.TestCase):
         saved = self.client.post("/api/presets/save").json()
         self.assertFalse(saved["unsaved"])
         on_disk = json.loads(self.presets_path.read_text())
-        self.assertEqual((on_disk["stations"][1]["x"], on_disk["shelf_slots"], on_disk["routes"]), (12.5, 4, ["A", "B,A"]))
+        self.assertEqual((on_disk["stations"][1]["x"], on_disk["shelf_slots"]), (12.5, 4))
+        self.assertNotIn("routes", on_disk)  # substrates come through the scheduler API
 
         presets["bed"] = [50, 50]
         self.client.put("/api/presets", json=presets)
@@ -453,7 +590,7 @@ class WebGuiTests(unittest.TestCase):
         self.assertEqual(reloaded["presets"]["bed"], [3000.0, 1000.0])
         self.assertFalse(reloaded["unsaved"])
 
-        for bad in ({"bed": [0, 10]}, {"shelf_slots": 0}, {"shelf_slots": 1, "routes": ["A", "B"]},
+        for bad in ({"bed": [0, 10]}, {"shelf_slots": 0},
                     {"stations": [{"name": "home", "address": "", "x": 0, "y": 0}]}):
             self.assertEqual(self.client.put("/api/presets", json={**presets, **bad}).status_code, 422, bad)
 
@@ -482,11 +619,13 @@ class WebGuiTests(unittest.TestCase):
         manager = build_manager(**settings)
         self.addCleanup(manager.gantry.close)
         self.assertEqual(manager.gantry.address, "http://127.0.0.1:8123")
-        self.assertEqual((manager.shelf_slots, len(manager.substrates)), (3, 3))
+        # Presets hold no samples: the scheduler starts idle.
+        self.assertEqual((manager.shelf_slots, manager.state, len(manager.substrates)), (3, "idle", 0))
+        manager.add_samples([Substrate(f"sample_{n}", ("experiment_a",)) for n in (1, 2, 3)])
         with self.assertRaises(ValueError):
             manager.add_substrate(Substrate("sample_4", ("experiment_a",)))
         with self.assertRaises(ValueError):
-            build_manager(**{**settings, "shelf_slots": 2, "gantry": ""})
+            build_manager(**{**settings, "routes": ["A", "A", "A"], "shelf_slots": 2, "gantry": ""})
 
     def test_snapshot_reports_nodes_that_are_not_started(self):
         presets = default_presets()
@@ -558,6 +697,22 @@ class WebGuiTests(unittest.TestCase):
             self.assertEqual(snap["gantry"]["payload"]["source"], "simulated")
             self.assertEqual(snap["gantry"]["payload"]["z"], 0.0)
             self.assertIn("substrates", client.get("/scheduler/state").json())
+            self.assertEqual(snap["shelf"]["shelf"][0]["substrate"]["id"], "sample_1")
+
+            # The page adds and clears substrates through the GUI server.
+            added = client.post("/api/substrates", json={"route": ["A"], "slot": 5}).json()
+            self.assertEqual((added["ok"], added["result"]["slot"]), (True, 5), added)
+            self.assertFalse(client.post("/api/substrates", json={"route": ["Z"]}).json()["ok"])
+            self.assertEqual(client.post("/api/substrates", json={}).status_code, 422)
+            # Both APIs have interactive docs.
+            self.assertEqual(client.get("/docs").status_code, 200)
+            self.assertEqual(client.get("/scheduler/docs").status_code, 200)
+            self.assertIn("/substrates", client.get("/scheduler/openapi.json").json()["paths"])
+            self.assertTrue(client.delete("/api/shelf/5").json()["ok"])
+            self.assertFalse(client.delete("/api/shelf/5").json()["ok"])
+            self.assertTrue(client.post("/api/stop").json()["ok"])
+            self.assertIn("Refused", client.post("/api/stop").json()["message"])
+            self.assertTrue(client.post("/api/resume").json()["ok"])
 
             self.assertEqual(client.post("/api/move", json={"x": 5, "y": 5}).json(), {"ok": True, "message": "Moving"})
             self.assertIn("Refused", client.post("/api/move", json={"x": 1, "y": 1}).json()["message"])

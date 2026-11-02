@@ -4,10 +4,12 @@ It also listens to the gantry's /status on its own thread, so ``position``
 is the gantry's real (x, y) as last reported, never an estimate.
 
 Fire and check: commands go out in order on the link's own thread, so the
-scheduler never waits on the network. Before each command the link waits
-(up to READY_TIMEOUT) for the gantry to finish the previous one. The scheduler
-keeps its own timing and assumes each command worked; the reply only decides
-what ``report`` says, e.g. "move not available: gantry NOT STARTED".
+scheduler never waits on the network. ``send`` returns a ticket, and
+``done(ticket)`` turns true once the gantry has finished that command (up to
+READY_TIMEOUT), so the scheduler can wait for the real gantry instead of its
+own clock. A command the gantry rejects, or that cannot reach it, counts as
+done at once; the reply only decides what ``report`` says, e.g. "move not
+available: gantry NOT STARTED".
 """
 
 from __future__ import annotations
@@ -23,7 +25,8 @@ from labnode.listen import UNREADABLE
 
 
 REQUEST_TIMEOUT = 2.0
-READY_TIMEOUT = 30.0
+# A long, slow leg can take a while; past this the link stops waiting for it.
+READY_TIMEOUT = 120.0
 READY_POLL = 0.05
 POSITION_POLL = 0.02
 
@@ -35,7 +38,12 @@ class GantryLink:
         self._lock = threading.Lock()
         self._last: Optional[dict[str, Any]] = None
         self._failures = 0
-        self._queue: "queue.Queue[Optional[tuple[str, dict[str, Any]]]]" = queue.Queue()
+        self._queue: "queue.Queue[Optional[tuple[int, str, dict[str, Any]]]]" = queue.Queue()
+        # Tickets are handed out in order and finished in order.
+        self._issued = 0
+        self._finished = 0
+        # Bumped by stop_now: a command queued before an emergency stop is dropped.
+        self._epoch = 0
         self._thread = threading.Thread(target=self._run, name="gantry-link", daemon=True)
         self._thread.start()
         self.listener = NodeListener(self.address, "/status", interval=POSITION_POLL)
@@ -62,9 +70,39 @@ class GantryLink:
         except (KeyError, TypeError, ValueError):
             return None
 
-    def send(self, command: str, **arguments: Any) -> None:
-        """Queue ``move``, ``pick`` or ``place`` (NodeClient method names)."""
-        self._queue.put((command, arguments))
+    def send(self, command: str, **arguments: Any) -> int:
+        """Queue ``move``, ``pick`` or ``place`` (NodeClient method names); see stop_now for stop.
+
+        Returns the command's ticket for ``done``.
+        """
+        with self._lock:
+            self._issued += 1
+            ticket = self._issued
+        self._queue.put((ticket, command, arguments))
+        return ticket
+
+    def done(self, ticket: int) -> bool:
+        """True once the gantry has finished (or could not take) command ``ticket``."""
+        with self._lock:
+            return ticket <= self._finished
+
+    def _finish(self, ticket: int) -> None:
+        with self._lock:
+            self._finished = max(self._finished, ticket)
+
+    def stop_now(self) -> None:
+        """Emergency stop: drop queued commands and send /stop at once, without waiting."""
+        with self._lock:
+            self._epoch += 1
+        try:
+            while True:
+                item = self._queue.get_nowait()
+                if item is not None:
+                    self._finish(item[0])
+                self._queue.task_done()
+        except queue.Empty:
+            pass
+        threading.Thread(target=self._record, args=("stop", {}), name="gantry-stop", daemon=True).start()
 
     def report(self) -> dict[str, Any]:
         """The gantry address, the last command's outcome and the failure count."""
@@ -88,31 +126,56 @@ class GantryLink:
             try:
                 if item is None:
                     return
-                command, arguments = item
-                self._wait_until_ready()
-                ok, reason = self._send(command, arguments)
-                message = f"{command} sent" if ok else f"{command} not available: {reason}"
+                ticket, command, arguments = item
                 with self._lock:
-                    # Print a failure once, not again for every command it repeats on.
-                    repeated = self._last is not None and self._last["reason"] == reason
-                    self._last = {"command": command, "ok": ok, "message": message, "reason": reason, "at": time.time()}
-                    if not ok:
-                        self._failures += 1
-                if not ok and not repeated:
-                    print(f"gantry: {message}", file=sys.stderr, flush=True)
+                    epoch = self._epoch
+                self._wait_until_ready()
+                with self._lock:
+                    dropped = epoch != self._epoch
+                if not dropped and self._record(command, arguments):
+                    # Accepted: the gantry is busy with it until it finishes.
+                    error = self._wait_until_ready().get("error")
+                    if error:
+                        self._failed(command, error)
+                self._finish(ticket)
             finally:
                 self._queue.task_done()
 
-    def _wait_until_ready(self) -> None:
-        """Let the gantry finish its current action; give up quietly if it cannot be read."""
+    def _record(self, command: str, arguments: dict[str, Any]) -> bool:
+        """Send one command, remember how it went and return whether it was accepted."""
+        ok, reason = self._send(command, arguments)
+        message = f"{command} sent" if ok else f"{command} not available: {reason}"
+        with self._lock:
+            # Print a failure once, not again for every command it repeats on.
+            repeated = self._last is not None and self._last["reason"] == reason
+            self._last = {"command": command, "ok": ok, "message": message, "reason": reason, "at": time.time()}
+            if not ok:
+                self._failures += 1
+        if not ok and not repeated:
+            print(f"gantry: {message}", file=sys.stderr, flush=True)
+        return ok
+
+    def _failed(self, command: str, error: str) -> None:
+        """The gantry took ``command`` but could not finish it."""
+        message = f"{command} failed: {error}"
+        with self._lock:
+            self._last = {"command": command, "ok": False, "message": message, "reason": error, "at": time.time()}
+            self._failures += 1
+        print(f"gantry: {message}", file=sys.stderr, flush=True)
+
+    def _wait_until_ready(self) -> dict[str, Any]:
+        """Let the gantry finish its current action and return its /status ({} if it cannot be read)."""
         deadline = time.monotonic() + READY_TIMEOUT
+        status: dict[str, Any] = {}
         while time.monotonic() < deadline:
             try:
-                if not self.client.status().get("busy"):
-                    return
+                status = self.client.status()
+                if not status.get("busy"):
+                    return status
             except (NodeUnreachable, NodeError, ValueError, AttributeError):
-                return
+                return {}
             time.sleep(READY_POLL)
+        return status
 
     def _send(self, command: str, arguments: dict[str, Any]) -> tuple[bool, str]:
         """``(ok, reason)``; the reason says why a command was not available."""

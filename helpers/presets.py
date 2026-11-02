@@ -2,7 +2,8 @@
 
 Bed size, the gantry node's address, home and move time, where python -m web
 finds the scheduler, shelf location and slots, each station's node address
-and location, calibration and sample routes.
+and location, and calibration. Samples and routes are not presets: they come
+through the scheduler's POST /substrates.
 """
 
 from __future__ import annotations
@@ -19,7 +20,6 @@ PRESETS_PATH = DATA_DIR / "presets.json"
 # Settings file from before presets existed; read once if presets.json is missing.
 LAYOUT_PATH = DATA_DIR / "gantry_layout.json"
 DEFAULT_HOST = "127.0.0.1"
-DEFAULT_ROUTES = ["A,B,C", "C,A", "B,C"]
 
 # Bed coordinates are millimetres, with (0, 0) at the bottom-left corner.
 DEFAULT_BED = [3000.0, 1000.0]
@@ -41,7 +41,6 @@ def default_presets() -> dict[str, Any]:
         "shelf_slots": 10,
         "calibration": {"home_raw": None, "home_bed": [0.0, 0.0], "scale": [1.0, 1.0]},
         "stations": [dict(station) for station in DEFAULT_STATIONS],
-        "routes": list(DEFAULT_ROUTES),
     }
 
 
@@ -102,12 +101,6 @@ def validate_presets(data: Any) -> dict[str, Any]:
         raise ValueError('"home" is the gantry\'s own spot, not a station name')
     if "shelf" not in names:
         stations.insert(0, dict(DEFAULT_STATIONS[0]))
-    routes = data.get("routes", defaults["routes"])
-    if not isinstance(routes, list) or not all(isinstance(route, str) for route in routes):
-        raise ValueError("routes must be a list of text like \"A,B,C\"")
-    routes = [route.strip() for route in routes if route.strip()]
-    if len(routes) > int(slots):
-        raise ValueError(f"{len(routes)} sample routes but the shelf has {int(slots)} slots")
     return {
         "bed": bed,
         "gantry_address": address.strip(),
@@ -121,7 +114,6 @@ def validate_presets(data: Any) -> dict[str, Any]:
             "scale": scale,
         },
         "stations": stations,
-        "routes": routes,
     }
 
 

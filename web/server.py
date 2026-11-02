@@ -14,9 +14,13 @@ forwards gantry moves to POST /pos.
     PUT  /api/presets          change the current settings (not yet written to disk)
     POST /api/presets/save     write the current settings to data/presets.json
     POST /api/presets/reload   throw away unsaved changes and re-read data/presets.json
-    GET  /api/snapshot         latest station statuses and gantry reading
+    GET  /api/snapshot         latest station statuses, gantry reading and shelf slots
     GET  /api/gantry/stream    main.py only: the gantry's position as it changes (Server-Sent Events)
     POST /api/move             {"x": .., "y": ..} in gantry coordinates -> gantry POST /pos
+    POST /api/substrates       {"route", "id", "slot", "metadata"} -> scheduler POST /substrates
+    DELETE /api/shelf/{slot}   -> scheduler DELETE /shelf/{slot}
+    DELETE /api/shelf          -> scheduler DELETE /shelf
+    POST /api/stop, /api/resume -> scheduler POST /stop, /resume
 """
 
 from __future__ import annotations
@@ -29,10 +33,11 @@ import threading
 from pathlib import Path
 from typing import Any, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from gantry.scheduler import NOT_STARTED
-from helpers.polling import NodePoller
+from gantry.server import SubstrateSpec
+from helpers.polling import NodePoller, fetch
 from helpers.presets import DATA_DIR, LAYOUT_PATH, PRESETS_PATH, load_presets, poll_targets, save_presets, validate_presets
 from labnode import NodeClient, NodeError, NodeUnreachable
 from labnode.server import TOKEN_ENV
@@ -95,6 +100,25 @@ class PresetsStore:
             return statuses, (None, payload["problem"], payload["detail"])
         return statuses, (payload, "", "")
 
+    def shelf(self) -> dict[str, Any]:
+        """The scheduler's shelf slots, or ``{"problem": ...}`` when it cannot be read."""
+        if self.scheduler is not None:
+            return self.scheduler.shelf()
+        address = self.get()["scheduler_address"]
+        if not address:
+            return {"problem": "No scheduler address set"}
+        payload, problem, detail = fetch(address, "/shelf")
+        if problem:
+            label = "Scheduler NOT STARTED" if problem == NOT_STARTED else "Scheduler UNABLE TO READ"
+            return {"problem": f"{label}: {detail}"}
+        return payload
+
+    def shelf_action(self, method: str, path: str, body: Any = None) -> dict[str, Any]:
+        """Add, clear, stop or resume on the scheduler; ``{"ok", "message", "result"}`` for the page."""
+        if self.scheduler is not None:
+            return scheduler_action(self.scheduler, method, path, body)
+        return forward_action(self.get()["scheduler_address"], method, path, body)
+
     def gantry_reading(self) -> dict[str, Any]:
         """The gantry's position as the scheduler has it right now (main.py only)."""
         pos = self.scheduler.pos()
@@ -152,6 +176,49 @@ def move_scheduler(scheduler: Any, x: float, y: float) -> dict[str, Any]:
     return {"ok": True, "message": "Moving"}
 
 
+def scheduler_action(scheduler: Any, method: str, path: str, body: Any = None) -> dict[str, Any]:
+    """The in-process scheduler's side of ``shelf_action`` (main.py)."""
+    try:
+        if (method, path) == ("POST", "/substrates"):
+            result = scheduler.add_substrate(SubstrateSpec(**body))
+        elif (method, path) == ("DELETE", "/shelf"):
+            result = scheduler.clear_shelf()
+        elif method == "DELETE" and path.startswith("/shelf/"):
+            result = scheduler.clear_slot(int(path.rsplit("/", 1)[1]))
+        elif (method, path) == ("POST", "/stop"):
+            result = scheduler.emergency_stop()
+        elif (method, path) == ("POST", "/resume"):
+            result = scheduler.resume()
+        else:
+            raise ValueError(f"unknown action {method} {path}")
+    except RuntimeError as error:
+        return {"ok": False, "message": f"Refused: {error}", "result": None}
+    except ValidationError as error:
+        first = error.errors()[0]
+        field = ".".join(str(part) for part in first["loc"])
+        return {"ok": False, "message": f"{field}: {first['msg']}" if field else first["msg"], "result": None}
+    except (ValueError, TypeError) as error:
+        return {"ok": False, "message": str(error), "result": None}
+    return {"ok": True, "message": "Done", "result": result}
+
+
+def forward_action(address: str, method: str, path: str, body: Any = None) -> dict[str, Any]:
+    """Send a shelf action to the scheduler at ``address`` (python -m web alone)."""
+    if not address:
+        return {"ok": False, "message": "No scheduler address set", "result": None}
+    try:
+        client = NodeClient(address, token=os.environ.get(TOKEN_ENV) or None, timeout=2.0)
+        result = client._request(method, path, body)
+    except NodeUnreachable:
+        return {"ok": False, "message": "Scheduler NOT STARTED: nothing at that address", "result": None}
+    except NodeError as error:
+        prefix = "Refused: " if error.status == 409 else ""
+        return {"ok": False, "message": f"{prefix}{error.detail}", "result": None}
+    except ValueError as error:
+        return {"ok": False, "message": f"UNABLE TO READ: {error}", "result": None}
+    return {"ok": True, "message": "Done", "result": result}
+
+
 def move_gantry(address: str, x: float, y: float) -> dict[str, Any]:
     """Send POST /pos to the scheduler at ``address`` and describe the outcome for the page."""
     if not address:
@@ -172,7 +239,11 @@ def create_app(store: PresetsStore):
     from fastapi import Body, FastAPI, HTTPException
     from fastapi.responses import FileResponse, StreamingResponse
 
-    app = FastAPI(title="gantry web GUI")
+    app = FastAPI(
+        title="gantry web GUI",
+        description="The page's own API. Under main.py the scheduler's API (add substrates, shelf, "
+                    "stop) is mounted at /scheduler, with its docs at /scheduler/docs.",
+    )
 
     @app.get("/", include_in_schema=False)
     def index() -> FileResponse:
@@ -218,6 +289,7 @@ def create_app(store: PresetsStore):
             "statuses": statuses,
             "gantry": {"payload": payload, "problem": problem, "detail": detail},
             "gantry_link": store.gantry_link(),
+            "shelf": store.shelf(),
             "unsaved": store.unsaved,
         }
 
@@ -246,6 +318,26 @@ def create_app(store: PresetsStore):
         if store.scheduler is not None:
             return move_scheduler(store.scheduler, request.x, request.y)
         return move_gantry(store.get()["scheduler_address"], request.x, request.y)
+
+    @app.post("/api/substrates", summary="Add a substrate to a shelf slot (scheduler POST /substrates)")
+    def post_substrate(request: SubstrateSpec) -> dict[str, Any]:
+        return store.shelf_action("POST", "/substrates", request.model_dump(exclude_none=True))
+
+    @app.delete("/api/shelf/{slot}", summary="Clear one shelf slot (scheduler DELETE /shelf/{slot})")
+    def delete_slot(slot: int) -> dict[str, Any]:
+        return store.shelf_action("DELETE", f"/shelf/{slot}")
+
+    @app.delete("/api/shelf", summary="Clear every slot whose substrate is on the shelf")
+    def delete_shelf() -> dict[str, Any]:
+        return store.shelf_action("DELETE", "/shelf")
+
+    @app.post("/api/stop", summary="Emergency stop (scheduler POST /stop)")
+    def post_stop() -> dict[str, Any]:
+        return store.shelf_action("POST", "/stop")
+
+    @app.post("/api/resume", summary="Carry on after an emergency stop (scheduler POST /resume)")
+    def post_resume() -> dict[str, Any]:
+        return store.shelf_action("POST", "/resume")
 
     return app
 

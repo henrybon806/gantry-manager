@@ -6,8 +6,8 @@ then, from the project folder:
     python -m gantry        # same as python main.py --no-gui
 
 Everything comes from data/presets.json (saved from the web GUI): the gantry
-node's address, home, move time, shelf location and slots, each station's node
-address and location, and the sample routes. Any flag overrides its preset:
+node's address, home, move time, shelf location and slots, and each station's
+node address and location. Any flag overrides its preset:
 
     python -m gantry --port 8200 --gantry 127.0.0.1:8100 --home 0,0 --shelf 300,500 \\
         --node A=8001@1050,750 --node B=8002@1800,250 --node C=8003@2550,650 \\
@@ -15,6 +15,10 @@ address and location, and the sample routes. Any flag overrides its preset:
 
 ``@x,y`` is where each station sits on the bed, in mm from the bottom-left corner. The gantry starts at its home,
 its own spot, and travels to the shelf like any other location.
+
+The scheduler is always on. Substrates (each with a route) are added to
+shelf slots through the API below whenever they arrive, and run as soon as
+their instruments are free; --route adds some at startup.
 
 The scheduler drives the nodes over HTTP (POST /start, POST /taken), sends the
 gantry node move, pick and place (assuming they work; see gantry/link.py), and
@@ -25,6 +29,17 @@ serves its own state on --port (default 8200):
     GET /position  same as /pos (the labnode name, used by the GUI's Lab mode)
     GET /state     scheduler snapshot: samples, queue, transport, events
     GET /status    short summary
+
+    GET    /shelf               every slot: empty, or its substrate and what it is doing
+    POST   /substrates          {"route": ["A", "B"], "id": opt, "slot": opt, "metadata": opt}
+    DELETE /shelf/{slot}        clear one slot (its substrate leaves the queue and the view)
+    DELETE /shelf               clear every slot whose substrate is on the shelf
+    POST   /stop                emergency stop: halt scheduling, /stop the gantry and busy instruments
+    POST   /resume              carry on after a stop
+
+A route is a list of experiments (letters or station names) or "A,B,C".
+Slots are numbered from 1; without one, a substrate takes the first free
+slot. Without an id it gets the next free sample_N.
 """
 
 from __future__ import annotations
@@ -37,10 +52,10 @@ import traceback
 from pathlib import Path
 from typing import Any, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from gantry.link import GantryLink
-from gantry.scheduler import HOME, GantryManager, Point, RemoteExperiment, parse_route
+from gantry.scheduler import ExperimentClient, HOME, GantryManager, Point, RemoteExperiment, parse_route
 from gantry.substrates import Substrate
 from helpers.presets import PRESETS_PATH, load_presets, station_bed_to_raw
 from labnode.server import LOOPBACK_HOSTS, TOKEN_ENV
@@ -72,7 +87,7 @@ def parse_node(entry: str) -> tuple[str, str, Point]:
 
 def build_manager(
     nodes: list,
-    routes: list[str],
+    routes: Optional[list[str]],
     movement_time: float,
     home: "str | Point" = DEFAULT_HOME,
     shelf: "str | Point" = DEFAULT_SHELF,
@@ -81,7 +96,9 @@ def build_manager(
 ) -> GantryManager:
     """``nodes`` are ``(name, address, (x, y))`` tuples or ``"A=8001@35,45"`` strings.
 
-    ``gantry`` is the gantry node's address; empty or None only simulates it.
+    ``routes`` (one per substrate) fill shelf slots 1, 2, ... straight away;
+    more can be added any time with POST /substrates. ``gantry`` is the gantry
+    node's address; empty or None only simulates it.
     """
     token = os.environ.get(TOKEN_ENV) or None
     clients = []
@@ -96,7 +113,7 @@ def build_manager(
     known = {client.name for client in clients}
     substrates = [
         Substrate(f"sample_{index + 1}", parse_route(route, known))
-        for index, route in enumerate(routes)
+        for index, route in enumerate(routes or [])
     ]
     link = GantryLink(gantry.strip(), token=token) if gantry and gantry.strip() else None
     return GantryManager(
@@ -119,7 +136,7 @@ def settings_from_presets(presets: dict[str, Any]) -> dict[str, Any]:
     ]
     return {
         "nodes": nodes,
-        "routes": presets["routes"],
+        "routes": None,
         "movement_time": presets["move_time"],
         "home": station_bed_to_raw(presets, presets["gantry_home"]),
         "shelf": station_bed_to_raw(presets, [shelf["x"], shelf["y"]]),
@@ -131,6 +148,20 @@ def settings_from_presets(presets: dict[str, Any]) -> dict[str, Any]:
 class MoveRequest(BaseModel):
     x: float
     y: float
+
+
+class SubstrateSpec(BaseModel):
+    """One substrate to put on the shelf."""
+
+    model_config = {"json_schema_extra": {"examples": [
+        {"route": ["A", "B", "C"]},
+        {"id": "wafer_12", "route": "C,A", "slot": 4, "metadata": {"notes": "batch 3"}},
+    ]}}
+
+    route: "list[str] | str" = Field(description='Experiments in order: letters or station names, a list or "A,B,C"')
+    id: Optional[str] = Field(None, description="Unique id; without one it gets the next free sample_N")
+    slot: Optional[int] = Field(None, description="Shelf slot from 1; without one, the first free slot")
+    metadata: dict[str, Any] = Field(default_factory=dict, description="Anything to keep with the substrate")
 
 
 class Scheduler:
@@ -164,16 +195,82 @@ class Scheduler:
             self.manager.move_to((x, y))
             return self.manager.pos()
 
+    def _substrate(self, spec: SubstrateSpec) -> Substrate:
+        """A Substrate for ``spec``; without an id it becomes the next free sample_N."""
+        route = spec.route if isinstance(spec.route, str) else ",".join(spec.route)
+        sample_id = (spec.id or "").strip()
+        if not sample_id:
+            used = {substrate.substrate_id for substrate in self.manager.substrates}
+            counter = 1
+            while f"sample_{counter}" in used:
+                counter += 1
+            sample_id = f"sample_{counter}"
+        return Substrate(sample_id, parse_route(route, set(self.manager.clients)), metadata=dict(spec.metadata))
+
+    def shelf(self) -> dict[str, Any]:
+        with self.lock:
+            return self.manager.shelf()
+
+    def add_substrate(self, spec: SubstrateSpec) -> dict[str, Any]:
+        with self.lock:
+            substrate = self._substrate(spec)
+            self.manager.add_substrate(substrate, spec.slot)
+            return self.manager.substrate_view(substrate)
+
+    def clear_slot(self, slot: int) -> dict[str, Any]:
+        with self.lock:
+            self.manager.clear_slot(slot)
+            return self.manager.shelf()
+
+    def clear_shelf(self) -> dict[str, Any]:
+        with self.lock:
+            cleared, kept = self.manager.clear_shelf()
+            return {**self.manager.shelf(), "cleared": cleared, "kept": kept}
+
+    def resume(self) -> dict[str, Any]:
+        with self.lock:
+            self.manager.resume()
+            return self.manager.shelf()
+
+    def emergency_stop(self) -> dict[str, Any]:
+        """Emergency stop: halt scheduling, then /stop the gantry and busy instruments."""
+        with self.lock:
+            busy = self.manager.emergency_stop()
+            if self.manager.gantry is not None:
+                self.manager.gantry.stop_now()
+            clients = [self.manager.clients[name] for name in busy]
+            shelf = self.manager.shelf()
+        for client in clients:
+            if isinstance(client, ExperimentClient):
+                continue
+            threading.Thread(target=self._stop_node, args=(client,), name=f"stop {client.name}", daemon=True).start()
+        return shelf
+
+    def _stop_node(self, client: RemoteExperiment) -> None:
+        try:
+            client.node.stop()
+            outcome = ("node_stopped", client.name)
+        except Exception as error:
+            outcome = ("node_stop_failed", f"{client.name}: {error}")
+        with self.lock:
+            self.manager.events.append((self.manager.now, *outcome))
+
+    def _status(self, client: Any) -> dict[str, Any]:
+        # Remote clients keep their node's last /status; in-memory ones only have a state.
+        if isinstance(client, ExperimentClient):
+            return {"state": client.poll(self.manager.now)}
+        return dict(client.status)
+
     def node_statuses(self) -> dict[str, dict[str, Any]]:
         """Each node's latest /status as the scheduler last read it."""
         with self.lock:
-            return {name: dict(client.status) for name, client in self.manager.clients.items()}
+            return {name: self._status(client) for name, client in self.manager.clients.items()}
 
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
             state = self.manager.snapshot()
             state["clients"] = {
-                name: {**state["clients"][name], "state": client.status.get("state")}
+                name: {**state["clients"][name], "state": self._status(client).get("state")}
                 for name, client in self.manager.clients.items()
             }
             return state
@@ -194,7 +291,11 @@ def create_app(scheduler: Scheduler, token: Optional[str] = None):
 
     from fastapi import Depends, FastAPI, HTTPException
     from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-    app = FastAPI(title="gantry scheduler")
+    app = FastAPI(
+        title="gantry scheduler",
+        description="Always-on scheduler: POST /substrates to add one to the shelf; it runs as soon as "
+                    "its instruments are free. Interactive docs at /docs.",
+    )
     bearer = HTTPBearer(auto_error=False)
 
     def authorize(credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer)) -> None:
@@ -217,6 +318,42 @@ def create_app(scheduler: Scheduler, token: Optional[str] = None):
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from None
 
+    def call(action, *args) -> dict[str, Any]:
+        try:
+            return action(*args)
+        except RuntimeError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from None
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from None
+
+    @app.get("/shelf", summary="Every shelf slot: empty, or its substrate and what it is doing")
+    def get_shelf() -> dict[str, Any]:
+        return scheduler.shelf()
+
+    @app.post("/substrates", status_code=201, dependencies=[Depends(authorize)],
+              summary="Add a substrate to a slot (or the first free one); it runs as soon as it can")
+    def post_substrate(request: SubstrateSpec) -> dict[str, Any]:
+        return call(scheduler.add_substrate, request)
+
+    @app.delete("/shelf/{slot}", dependencies=[Depends(authorize)],
+                summary="Clear one slot; 409 while its substrate is out at an instrument or moving")
+    def delete_slot(slot: int) -> dict[str, Any]:
+        return call(scheduler.clear_slot, slot)
+
+    @app.delete("/shelf", dependencies=[Depends(authorize)],
+                summary="Clear every slot whose substrate is on the shelf")
+    def delete_shelf() -> dict[str, Any]:
+        return call(scheduler.clear_shelf)
+
+    @app.post("/stop", dependencies=[Depends(authorize)],
+              summary="Emergency stop: halt scheduling and /stop the gantry and busy instruments")
+    def post_stop() -> dict[str, Any]:
+        return call(scheduler.emergency_stop)
+
+    @app.post("/resume", dependencies=[Depends(authorize)], summary="Carry on scheduling after a stop")
+    def post_resume() -> dict[str, Any]:
+        return call(scheduler.resume)
+
     @app.get("/position", summary="Same as /pos (labnode name)")
     def get_position() -> dict[str, Any]:
         return scheduler.pos()
@@ -230,7 +367,8 @@ def create_app(scheduler: Scheduler, token: Optional[str] = None):
         state = scheduler.snapshot()
         return {
             "name": "gantry",
-            "state": "done" if state["completed"] else "busy",
+            "state": state["state"],
+            "shelf": {key: value for key, value in state["shelf"].items() if key != "shelf"},
             "now": state["now"],
             "position": state["position"],
             "clients": state["clients"],
@@ -248,7 +386,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--home", help="gantry home x,y")
     parser.add_argument("--shelf", help="shelf x,y")
     parser.add_argument("--slots", type=int, help="shelf slots")
-    parser.add_argument("--route", action="append", help="one sample's route, e.g. A,B,C; repeat per sample (replaces the preset routes)")
+    parser.add_argument("--route", action="append", help="add a substrate at startup: its route, e.g. A,B,C; repeat per substrate")
     parser.add_argument("--move-time", type=float, help="seconds per gantry leg")
     parser.add_argument("--gantry", help="gantry node address for move/pick/place; \"\" to only simulate it")
 

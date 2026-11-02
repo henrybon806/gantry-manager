@@ -116,15 +116,82 @@
   #stations td.name { font: bold 12px Menlo, monospace; color: var(--text); white-space: nowrap; }
   #stations input.num { width: 56px; }
   .remove { color: var(--bad); cursor: pointer; border: 0; background: none; padding: 0 4px; font-size: 14px; }
+  /* ------------------------------------------------------------ shelf */
+  #shelf-panel { background: var(--card); border: 1px solid var(--line); margin-top: 14px; padding: 12px 14px 14px; }
+  #shelf-panel .head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+  #shelf-panel h2 { margin: 0; font-size: 12px; }
+  .badge { font: bold 10px Menlo, monospace; letter-spacing: 0.05em; padding: 2px 7px; border-radius: 10px; color: var(--card); background: var(--faint); }
+  .badge.running { background: var(--busy); }
+  .badge.idle { background: var(--idle); }
+  .badge.stopped { background: var(--bad); }
+  #shelf-counts { flex: 1; min-width: 160px; color: var(--muted); font: 11px Menlo, monospace; }
+  button.danger { background: var(--bad); border-color: var(--bad); color: #fff; font-weight: bold; }
+  button.danger:hover:not(:disabled) { background: #9c3434; border-color: #9c3434; }
+  #shelf-message { min-height: 16px; margin: -4px 0 8px; }
+  #slots { display: grid; grid-template-columns: repeat(auto-fill, minmax(112px, 1fr)); gap: 6px; }
+  .slot {
+    position: relative; min-height: 80px; padding: 5px 7px 6px; border-radius: 5px;
+    background: var(--card); border: 2px solid var(--line); display: flex; flex-direction: column; gap: 3px;
+  }
+  .slot .num { font: bold 10px Menlo, monospace; color: var(--muted); letter-spacing: 0.06em; }
+  .slot.empty {
+    border: 2px dashed var(--line); background: var(--bed); cursor: pointer;
+    align-items: center; justify-content: center; text-align: center; color: var(--faint);
+  }
+  .slot.empty .num { position: absolute; top: 5px; left: 7px; }
+  .slot.empty:hover, .slot.empty:focus-visible { border-color: var(--idle); color: var(--idle); outline: none; }
+  .slot.empty .plus { font-size: 15px; line-height: 1; }
+  .slot.empty .label { font: bold 10px Menlo, monospace; letter-spacing: 0.06em; }
+  .slot .sid { font: bold 11px Menlo, monospace; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-right: 18px; }
+  .slot .status { font: bold 10px Menlo, monospace; letter-spacing: 0.04em; }
+  .slot .notes { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .slot .clear { position: absolute; top: 4px; right: 4px; border: 0; background: none; color: var(--faint); font-size: 14px; padding: 2px 6px; }
+  .slot .clear:hover { color: var(--bad); background: none; }
+  .slot.queued { border-color: #b9b1a3; }
+  .slot.waiting { border-color: var(--shelf); }
+  .slot.moving { border-color: var(--ink); }
+  .slot.in-experiment { border-color: var(--busy); }
+  .slot.done { border-color: var(--done); background: #fbf3ea; }
+  .slot.queued .status { color: var(--muted); }
+  .slot.waiting .status { color: #a8812f; }
+  .slot.moving .status { color: var(--ink); }
+  .slot.in-experiment .status { color: var(--busy); }
+  .slot.done .status { color: var(--done); }
+  .route { display: flex; flex-wrap: wrap; align-items: center; gap: 3px; margin-top: auto; }
+  .step { font: bold 10px Menlo, monospace; padding: 2px 5px; border-radius: 3px; border: 1px solid var(--line); color: var(--muted); background: var(--card); }
+  .step.past { background: var(--ok); border-color: var(--ok); color: #fff; }
+  .step.now { background: var(--busy); border-color: var(--busy); color: #fff; }
+  .step.next { border-color: var(--ink); color: var(--ink); }
+  .route .arrow { color: var(--faint); font-size: 10px; }
+  .progress { height: 4px; background: var(--grid); border-radius: 2px; overflow: hidden; }
+  .progress span { display: block; height: 100%; background: var(--ok); }
+  .slot.done .progress span { background: var(--done); }
+
+  /* ------------------------------------------------------- add dialog */
+  dialog { border: 1px solid var(--line); border-radius: 8px; padding: 16px 18px; width: min(440px, calc(100vw - 32px)); background: var(--card); color: var(--text); }
+  dialog::backdrop { background: rgba(38, 50, 56, 0.35); }
+  dialog h3 { margin: 0 0 10px; font-size: 14px; color: var(--ink); }
+  dialog label { display: block; font-size: 11px; color: var(--muted); margin: 10px 0 3px; letter-spacing: 0.04em; }
+  dialog input[type=text], dialog select { width: 100%; font: 12px Menlo, monospace; padding: 5px 6px; border: 1px solid var(--line); border-radius: 3px; background: var(--card); color: var(--text); }
+  #route-built { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; min-height: 30px; padding: 4px 6px; border: 1px dashed var(--line); border-radius: 4px; background: var(--bed); }
+  #route-built .empty-hint { color: var(--faint); font-size: 11px; }
+  #route-built .step { cursor: pointer; border-color: var(--ink); color: var(--ink); }
+  #route-built .step:hover { border-color: var(--bad); color: var(--bad); text-decoration: line-through; }
+  #route-options { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
+  #route-options button { font: bold 11px Menlo, monospace; }
+  dialog .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; align-items: center; }
+  dialog .actions .grow { flex: 1; }
+
   @media (max-width: 760px) {
     main { padding: 12px 16px; }
+    #slots { grid-template-columns: repeat(auto-fill, minmax(100px, 1fr)); }
   }
 </style>
 </head>
 <body>
 <header>
   <h1>GANTRY LAB</h1>
-  <span class="live" id="live">connecting…</span>
+  <span><a class="live" id="docs-link" href="/scheduler/docs" target="_blank" rel="noopener" style="margin-right:18px;color:var(--paper)">API docs</a><span class="live" id="live">connecting…</span></span>
 </header>
 <main>
   <div id="bed-wrap"><svg id="bed" xmlns="http://www.w3.org/2000/svg"></svg></div>
@@ -135,6 +202,39 @@
     <div class="unit">mm</div>
     <div id="readout" class="mono small"></div>
   </div>
+
+  <section id="shelf-panel">
+    <div class="head">
+      <h2>SHELF</h2>
+      <span id="shelf-state" class="badge">--</span>
+      <span id="shelf-counts"></span>
+      <button id="add-next">+ Add substrate</button>
+      <button id="clear-shelf" title="Clear every slot whose substrate is on the shelf (queued, waiting or done)">Clear shelf</button>
+      <button id="stop-resume" class="danger">Emergency stop</button>
+    </div>
+    <div id="shelf-message" class="mono small"></div>
+    <div id="slots"></div>
+  </section>
+
+  <dialog id="add-dialog">
+    <form id="add-substrate" method="dialog">
+      <h3 id="add-title">Add substrate</h3>
+      <label for="sub-slot">SLOT</label>
+      <select id="sub-slot"></select>
+      <label for="sub-id">ID <span style="color:var(--faint)">(optional, else the next sample_N)</span></label>
+      <input type="text" id="sub-id" spellcheck="false" autocomplete="off">
+      <label>ROUTE <span style="color:var(--faint)">(click experiments in order; click a step to remove it)</span></label>
+      <div id="route-built"></div>
+      <div id="route-options"></div>
+      <label for="sub-notes">NOTES <span style="color:var(--faint)">(optional, saved in metadata)</span></label>
+      <input type="text" id="sub-notes" autocomplete="off">
+      <div class="actions">
+        <span id="add-error" class="bad small grow"></span>
+        <button type="button" id="add-cancel">Cancel</button>
+        <button type="submit" id="add-submit" class="primary">Add</button>
+      </div>
+    </form>
+  </dialog>
 
   <div id="settings">
     <section>
@@ -184,6 +284,7 @@
         <input type="text" id="shelf-slots" class="num" style="width:48px">
         <span class="small">shelf slots (1–30)</span>
       </div>
+      <p class="hint">A new slot count is used once main.py restarts.</p>
     </section>
 
     <section>
@@ -389,11 +490,14 @@ async function poll() {
     const snap = await response.json();
     applySnapshot(snap);
     showGantryLink(snap.gantry_link);
+    renderShelf("shelf" in snap ? snap.shelf
+      : { problem: "This GUI server is older than the page and sends no shelf: restart python main.py" });
     if (snap.unsaved !== unsaved && !saveTimer) { unsaved = snap.unsaved; showPresetsStatus(); }
     lastPollOk = true;
   } catch {
     lastPollOk = false;
     statuses = {};
+    renderShelf({ problem: "GUI server not running (python main.py)" });
     setGantry(null, "GUI SERVER DOWN", "GUI server not running (python main.py)", null, false, null);
   }
   $("live").textContent = lastPollOk ? "LIVE" : "GUI SERVER DOWN";
@@ -550,8 +654,13 @@ function drawStation(s) {
   let state, color, detail = "";
   if (s.name === "shelf") {
     color = COLORS.shelf;
-    state = `${presets.shelf_slots}`;
-    detail = "slots";
+    if (shelf && shelf.slots) {
+      state = `${shelf.total}/${shelf.slots}`;
+      detail = "full";
+    } else {
+      state = `${presets.shelf_slots}`;
+      detail = "slots";
+    }
   } else if (!s.address) {
     state = "NO PORT"; color = "var(--faint)";
   } else {
@@ -738,7 +847,215 @@ $("add-form").addEventListener("submit", (event) => {
   draw();
 });
 
+// --------------------------------------------------------------- shelf
+
+let shelf = null;           // the scheduler's GET /shelf, or null when it cannot be read
+let shelfKey = "";          // last rendered shelf, so the cards are only rebuilt when it changes
+let shelfBusy = false;      // a shelf action is in flight
+let draftRoute = [];
+
+const STATUS_TEXT = {
+  queued: () => "QUEUED",
+  waiting: (sub) => `WAITING · NEXT ${stationLabel(sub.next)}`,
+  moving: (sub) => sub.next ? `ON GANTRY → ${stationLabel(sub.next)}` : "ON GANTRY → SHELF",
+  "in experiment": (sub) => {
+    const status = statuses[sub.location] || {};
+    if (sub.waiting_for_pickup || ["done", "stopped", "error"].includes(status.state)) return `${stationLabel(sub.location)} · ${(status.state || "done").toUpperCase()}`;
+    const left = typeof status.remaining === "number" ? ` · ${status.remaining.toFixed(0)}s` : "";
+    return `IN ${stationLabel(sub.location)}${left}`;
+  },
+  done: () => "✓ DONE",
+};
+
+function setShelfMessage(textContent, kind = "") {
+  const el = $("shelf-message");
+  el.textContent = textContent;
+  el.className = `mono small ${kind}`;
+}
+
+function renderShelf(data) {
+  const valid = data && Array.isArray(data.shelf);
+  shelf = valid ? data : null;
+  // Remaining seconds tick every poll; include them so the cards stay current.
+  const key = JSON.stringify([data, valid ? data.shelf.map((s) => s.substrate && statuses[s.substrate.location]) : null]);
+  if (key === shelfKey) return;
+  shelfKey = key;
+
+  const badge = $("shelf-state");
+  const stopButton = $("stop-resume");
+  $("add-next").disabled = !valid;
+  $("clear-shelf").disabled = !valid || !data.total;
+  stopButton.disabled = !valid;
+  if (!valid) {
+    badge.textContent = "OFFLINE";
+    badge.className = "badge stopped";
+    $("shelf-counts").textContent = "";
+    $("slots").innerHTML = "";
+    setShelfMessage(data && data.problem ? data.problem : "Shelf not available", "bad");
+    return;
+  }
+  if ($("shelf-message").classList.contains("bad") && $("shelf-message").dataset.sticky !== "1") setShelfMessage("");
+  badge.textContent = data.state.toUpperCase();
+  badge.className = `badge ${data.state}`;
+  const stopped = data.state === "stopped";
+  stopButton.textContent = stopped ? "Resume" : "Emergency stop";
+  stopButton.className = stopped ? "primary" : "danger";
+
+  const subs = data.shelf.map((s) => s.substrate).filter(Boolean);
+  const count = (status) => subs.filter((sub) => sub.status === status).length;
+  const active = subs.length - count("done") - count("queued");
+  $("shelf-counts").textContent =
+    `${count("queued")} queued · ${active} in progress · ${count("done")} done · ${data.slots - subs.length} empty`;
+
+  $("slots").innerHTML = data.shelf.map(({ slot, substrate }) => substrate ? slotCard(slot, substrate) : `
+    <div class="slot empty" data-slot="${slot}" tabindex="0" role="button" aria-label="Add a substrate to slot ${slot}">
+      <span class="num">SLOT ${slot}</span>
+      <span class="plus">+</span>
+      <span class="label">EMPTY</span>
+    </div>`).join("");
+}
+
+function slotCard(slot, sub) {
+  const steps = sub.route.map((name, index) => {
+    let kind = "";
+    if (index < sub.step - (sub.status === "in experiment" ? 1 : 0) || sub.completed) kind = "past";
+    else if (sub.status === "in experiment" && index === sub.step - 1) kind = "now";
+    else if (index === sub.step) kind = "next";
+    return `<span class="step ${kind}" title="${esc(name)}">${esc(stationLabel(name).replace("EXP ", ""))}</span>`;
+  }).join('<span class="arrow">→</span>');
+  const finished = sub.completed ? sub.route.length : Math.max(0, sub.step - (sub.status === "in experiment" ? 1 : 0));
+  const percent = Math.round(100 * finished / sub.route.length);
+  const notes = sub.metadata && sub.metadata.notes ? `<div class="notes" title="${esc(sub.metadata.notes)}">${esc(sub.metadata.notes)}</div>` : "";
+  const className = sub.status.replace(" ", "-");
+  return `
+    <div class="slot ${className}" data-slot="${slot}">
+      <span class="num">SLOT ${slot}</span>
+      <button class="clear" data-clear="${slot}" title="Clear slot ${slot} (removes ${esc(sub.id)})" aria-label="Clear slot ${slot}">✕</button>
+      <div class="sid" title="${esc(sub.id)}">${esc(sub.id)}</div>
+      <div class="status">${esc(STATUS_TEXT[sub.status](sub))}</div>
+      ${notes}
+      <div class="route">${steps}</div>
+      <div class="progress"><span style="width:${percent}%"></span></div>
+    </div>`;
+}
+
+async function shelfAction(method, path, body) {
+  shelfBusy = true;
+  try {
+    const response = await fetch(path, {
+      method,
+      headers: body ? { "Content-Type": "application/json" } : {},
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    const reply = await response.json();
+    if (!response.ok) {
+      const detail = Array.isArray(reply.detail) ? reply.detail.map((d) => `${d.loc.slice(1).join(".")}: ${d.msg}`).join("; ") : reply.detail;
+      return { ok: false, message: detail || "Refused" };
+    }
+    return reply;
+  } catch {
+    return { ok: false, message: "GUI server not running" };
+  } finally {
+    shelfBusy = false;
+  }
+}
+
+function experimentNames() {
+  return presets.stations.filter((s) => s.name !== "shelf").map((s) => s.name);
+}
+
+function renderDraftRoute() {
+  const built = $("route-built");
+  built.innerHTML = draftRoute.length
+    ? draftRoute.map((name, index) => `<span class="step" data-index="${index}" title="Remove">${esc(stationLabel(name))}</span>`).join('<span class="arrow">→</span>')
+    : '<span class="empty-hint">No experiments yet</span>';
+}
+
+function openAddDialog(slot) {
+  if (!shelf) return;
+  const free = shelf.shelf.filter((s) => !s.substrate).map((s) => s.slot);
+  if (!free.length) return setShelfMessage(`The shelf is full (${shelf.slots} slots). Clear a slot first.`, "bad");
+  const select = $("sub-slot");
+  select.innerHTML = `<option value="">Next free (slot ${free[0]})</option>` +
+    free.map((n) => `<option value="${n}">Slot ${n}</option>`).join("");
+  select.value = slot ? String(slot) : "";
+  $("add-title").textContent = slot ? `Add substrate to slot ${slot}` : "Add substrate";
+  $("sub-id").value = "";
+  $("sub-notes").value = "";
+  $("add-error").textContent = "";
+  draftRoute = [];
+  renderDraftRoute();
+  $("route-options").innerHTML = experimentNames()
+    .map((name) => `<button type="button" data-add="${esc(name)}">+ ${esc(stationLabel(name))}</button>`).join("")
+    || '<span class="small bad">No experiments configured</span>';
+  $("add-dialog").showModal();
+}
+
+$("route-options").addEventListener("click", (event) => {
+  const name = event.target.dataset.add;
+  if (!name) return;
+  draftRoute.push(name);
+  renderDraftRoute();
+});
+$("route-built").addEventListener("click", (event) => {
+  const index = event.target.dataset.index;
+  if (index === undefined) return;
+  draftRoute.splice(Number(index), 1);
+  renderDraftRoute();
+});
+$("add-cancel").addEventListener("click", () => $("add-dialog").close());
+$("add-substrate").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!draftRoute.length) { $("add-error").textContent = "Add at least one experiment."; return; }
+  const body = { route: draftRoute };
+  const id = $("sub-id").value.trim();
+  const slot = $("sub-slot").value;
+  const notes = $("sub-notes").value.trim();
+  if (id) body.id = id;
+  if (slot) body.slot = Number(slot);
+  if (notes) body.metadata = { notes };
+  $("add-submit").disabled = true;
+  const reply = await shelfAction("POST", "/api/substrates", body);
+  $("add-submit").disabled = false;
+  if (!reply.ok) { $("add-error").textContent = reply.message; return; }
+  $("add-dialog").close();
+  setShelfMessage(`Added ${reply.result.id} to slot ${reply.result.slot}`, "good");
+});
+
+$("add-next").addEventListener("click", () => openAddDialog(null));
+$("slots").addEventListener("click", async (event) => {
+  const clear = event.target.closest("[data-clear]");
+  if (clear) {
+    const slot = clear.dataset.clear;
+    const reply = await shelfAction("DELETE", `/api/shelf/${slot}`);
+    setShelfMessage(reply.ok ? `Cleared slot ${slot}` : reply.message, reply.ok ? "good" : "bad");
+    return;
+  }
+  const empty = event.target.closest(".slot.empty");
+  if (empty) openAddDialog(Number(empty.dataset.slot));
+});
+$("slots").addEventListener("keydown", (event) => {
+  const empty = event.target.closest(".slot.empty");
+  if (empty && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); openAddDialog(Number(empty.dataset.slot)); }
+});
+$("clear-shelf").addEventListener("click", async () => {
+  if (!confirm("Clear every slot whose substrate is on the shelf? They leave the queue and the history.")) return;
+  const reply = await shelfAction("DELETE", "/api/shelf");
+  if (!reply.ok) return setShelfMessage(reply.message, "bad");
+  const kept = reply.result.kept;
+  setShelfMessage(`Cleared ${reply.result.cleared.length} slot(s)` +
+    (kept.length ? `; kept ${kept.join(", ")} (out at an instrument or moving)` : ""), kept.length ? "warn" : "good");
+});
+$("stop-resume").addEventListener("click", async () => {
+  const resume = shelf && shelf.state === "stopped";
+  const reply = await shelfAction("POST", resume ? "/api/resume" : "/api/stop");
+  setShelfMessage(reply.ok ? (resume ? "Resumed" : "EMERGENCY STOP sent") : reply.message, reply.ok ? (resume ? "good" : "bad") : "bad");
+});
+
 // --------------------------------------------------------------- start
+
+// python -m web alone has no /scheduler mount; its own docs are at /docs.
+fetch("/scheduler/docs", { method: "HEAD" }).then((r) => { if (!r.ok) $("docs-link").href = "/docs"; }).catch(() => {});
 
 loadPresets().then(() => { startGantryStream(); poll(); }).catch(() => {
   $("live").textContent = "GUI SERVER DOWN";

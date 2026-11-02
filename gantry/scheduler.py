@@ -4,9 +4,19 @@ Clients are either in-memory ``ExperimentClient`` objects (tests, event-jumping
 simulation) or ``RemoteExperiment`` handles for labnode processes that were
 started separately, e.g. from ``sim/`` or lab-devices.
 
-The scheduler times every gantry leg itself (``movement_time``). With a
-``gantry`` link it also sends the gantry node move, pick and place as it
-goes, and assumes they worked.
+The gantry is told where to go by name, never by coordinates: each sample's
+trip is a ``pick`` at its source then a ``place`` at its destination, with
+``station`` (and ``slot`` on the shelf), and the gantry node finds its own
+way there. With a ``gantry`` link each leg lasts as long as the real gantry
+takes (and at least ``movement_time``); without one, exactly ``movement_time``.
+An instrument gets /taken only once the gantry has picked from it, and
+/start only once the gantry has placed in it. ``locations`` are bed points
+for drawing and for the gantry simulated without a node.
+
+The scheduler never finishes: substrates are added to numbered shelf slots
+whenever they arrive and run as soon as their next instrument is free. A
+finished substrate stays in its slot (shown as done) until the slot is
+cleared. An emergency stop halts scheduling until ``resume``.
 """
 
 from __future__ import annotations
@@ -29,6 +39,20 @@ STATUS_POLL = 0.1
 HOME = "home"
 # Position name after a manual move: parked at a free point, not a location.
 MANUAL = "manual"
+MAX_SAMPLES = 30
+
+# Scheduler states: nothing left to do, substrates moving or running, or
+# halted by an emergency stop until resumed.
+IDLE = "idle"
+RUNNING = "running"
+STOPPED = "stopped"
+
+# What a substrate in a slot is doing, for the shelf view.
+QUEUED = "queued"        # on the shelf, no step run yet
+WAITING = "waiting"      # on the shelf between steps
+MOVING = "moving"        # on the gantry
+IN_EXPERIMENT = "in experiment"
+DONE = "done"
 
 Point = tuple[float, float]
 
@@ -156,15 +180,20 @@ class _ManualMove:
     start: Point
     end: Point
     arrives_at: float
+    ticket: Optional[int] = None
 
 
 @dataclass
 class _Transport:
+    """One sample's trip: pickup (go to source and pick), then delivery (go to destination and place)."""
+
     substrate: Substrate
     source: str
     destination: str
     phase: str
     arrives_at: float
+    # The gantry command the current phase waits for; None without a gantry node.
+    ticket: Optional[int] = None
 
 
 class GantryManager:
@@ -181,20 +210,25 @@ class GantryManager:
     ) -> None:
         """``locations`` maps "home", "shelf" and each client name to bed (x, y).
 
-        ``shelf_slots`` caps how many samples the shelf holds (each keeps its slot
-        while it is out at an experiment); None means only the 30-sample limit.
-        ``gantry`` is a GantryLink (anything with ``send(command, **arguments)``);
-        None means the gantry is only simulated.
+        ``shelf_slots`` is how many numbered slots the shelf has (each substrate
+        keeps its slot while it is out at an experiment); None means 30.
+        ``substrates`` are added to slots 1, 2, ... straight away.
+        ``gantry`` is a GantryLink (anything with ``send(command, **arguments)``,
+        plus ``done(ticket)`` if ``send`` returns tickets); None means the gantry
+        is only simulated.
         """
         if movement_time <= 0:
             raise ValueError("movement_time must be positive")
         self.clients = {client.name: client for client in clients}
         if len(self.clients) != len(clients):
             raise ValueError("client names must be unique")
-        if shelf_slots is not None and len(substrates) > shelf_slots:
-            raise ValueError(f"{len(substrates)} samples but the shelf has {shelf_slots} slots")
-        self.substrates = substrates
-        self.shelf_slots = shelf_slots
+        if shelf_slots is not None and not 1 <= shelf_slots <= MAX_SAMPLES:
+            raise ValueError(f"shelf_slots must be 1 to {MAX_SAMPLES}")
+        self.shelf_slots = shelf_slots or MAX_SAMPLES
+        if len(substrates) > self.shelf_slots:
+            raise ValueError(f"{len(substrates)} samples but the shelf has {self.shelf_slots} slots")
+        # In the order they were added, which is the order they are started in.
+        self.substrates: list[Substrate] = []
         self.gantry = gantry
         self.movement_time = movement_time
         self.now = 0.0
@@ -209,11 +243,11 @@ class GantryManager:
         self._transport: Optional[_Transport] = None
         self._waiting: dict[str, tuple[Substrate, str]] = {}
         self.events: list[tuple[float, str, str]] = []
-
+        self.stopped = False
+        self.stopped_at: Optional[float] = None
+        # Scheduled from the first tick.
         for substrate in substrates:
-            for experiment_name in substrate.experiment_order:
-                if experiment_name not in self.clients:
-                    raise ValueError(f"unknown experiment client: {experiment_name}")
+            self._place(substrate, None)
 
     @property
     def gantry_busy(self) -> bool:
@@ -337,20 +371,26 @@ class GantryManager:
         start = self._simulated_coordinates()
         assert start is not None
         self._manual_move = _ManualMove(start, (float(point[0]), float(point[1])), self.now + self.movement_time)
-        self._command("move", x=float(point[0]), y=float(point[1]), params={"to": MANUAL})
+        self._manual_move.ticket = self._command("move", x=float(point[0]), y=float(point[1]), params={"to": MANUAL})
         self.events.append((self.now, "gantry_manual_move", f"({point[0]:g}, {point[1]:g})"))
 
-    def _command(self, command: str, **arguments: Any) -> None:
-        if self.gantry is not None:
-            self.gantry.send(command, **arguments)
+    def _command(self, command: str, **arguments: Any) -> Optional[int]:
+        """Send a gantry command; returns its ticket, or None if there is nothing to wait for."""
+        if self.gantry is None:
+            return None
+        return self.gantry.send(command, **arguments)
 
-    def _move_command(self, location: str) -> None:
-        if self.locations:
-            x, y = self.locations[location]
-            self._command("move", x=x, y=y, params={"to": location})
+    def _gantry_done(self, ticket: Optional[int]) -> bool:
+        return ticket is None or self.gantry is None or self.gantry.done(ticket)
 
-    def _hand_command(self, command: str, location: str, substrate: Substrate) -> None:
-        self._command(command, params={"station": location, "sample_id": substrate.substrate_id})
+    def _hand_command(self, command: str, location: str, substrate: Substrate) -> Optional[int]:
+        """``pick`` or ``place`` at a named location; the gantry finds its own way there."""
+        params: dict[str, Any] = {"station": location, "sample_id": substrate.substrate_id}
+        if location == "shelf":
+            # Each sample keeps its own shelf slot from added to cleared.
+            # The gantry numbers slots from 0; the API and GUI from 1.
+            params["slot"] = substrate.slot - 1
+        return self._command(command, params=params)
 
     def _point_of(self, position: str) -> Point:
         if position == MANUAL:
@@ -364,6 +404,8 @@ class GantryManager:
         return {
             "now": self.now,
             "completed": self.completed,
+            "state": self.state,
+            "stopped_at": self.stopped_at,
             "position": self.position,
             "movement_time": self.movement_time,
             "shelf_slots": self.shelf_slots,
@@ -392,43 +434,239 @@ class GantryManager:
                     "current_experiment_index": substrate.current_experiment_index,
                     "location": substrate.location,
                     "completed": substrate.completed,
+                    "slot": substrate.slot,
                 }
                 for substrate in self.substrates
             ],
+            "shelf": self.shelf(),
             "queue": self.queue_snapshot,
             "event_count": len(self.events),
             "events": [list(event) for event in self.events[-event_limit:]],
         }
 
-    def add_substrate(self, substrate: Substrate) -> None:
-        """Add a new substrate to the shelf queue without stopping active work."""
-        if len(self.substrates) >= 30:
-            raise ValueError("The simulator supports at most 30 substrates.")
-        if self.shelf_slots is not None and len(self.substrates) >= self.shelf_slots:
-            raise ValueError(f"The shelf is full ({self.shelf_slots} slots).")
-        if any(existing.substrate_id == substrate.substrate_id for existing in self.substrates):
-            raise ValueError(f"duplicate substrate id: {substrate.substrate_id}")
-        for experiment_name in substrate.experiment_order:
-            if experiment_name not in self.clients:
-                raise ValueError(f"unknown experiment client: {experiment_name}")
+    @property
+    def state(self) -> str:
+        """``stopped`` after an emergency stop, ``running`` while there is work, else ``idle``."""
+        if self.stopped:
+            return STOPPED
+        return RUNNING if self.gantry_busy or not self.completed else IDLE
+
+    def _slot_map(self) -> dict[int, Substrate]:
+        return {substrate.slot: substrate for substrate in self.substrates}
+
+    def free_slots(self) -> list[int]:
+        taken = self._slot_map()
+        return [slot for slot in range(1, self.shelf_slots + 1) if slot not in taken]
+
+    def add_substrate(self, substrate: Substrate, slot: Optional[int] = None) -> int:
+        """Put ``substrate`` in shelf ``slot`` (or the first free one) and queue it; returns the slot.
+
+        It is scheduled as soon as its first instrument is free, unless the
+        scheduler is stopped. ValueError if the slot is taken or out of range,
+        the shelf is full, the id is in use, or the route names an unknown
+        experiment.
+        """
+        slot = self._place(substrate, slot)
+        if not self.stopped and not self.gantry_busy:
+            self._schedule_next_transport()
+        return slot
+
+    def _place(self, substrate: Substrate, slot: Optional[int]) -> int:
+        """Validate ``substrate`` and put it in ``slot`` (or the first free one), without scheduling."""
+        if not substrate.experiment_order:
+            raise ValueError(f"{substrate.substrate_id} needs at least one experiment in its route")
+        unknown = [name for name in substrate.experiment_order if name not in self.clients]
+        if unknown:
+            raise ValueError(f"unknown experiment client: {', '.join(unknown)}")
+        if any(other.substrate_id == substrate.substrate_id for other in self.substrates):
+            raise ValueError(f"duplicate sample id: {substrate.substrate_id}")
+        if slot is None:
+            free = self.free_slots()
+            if not free:
+                raise ValueError(f"the shelf is full ({self.shelf_slots} slots)")
+            slot = free[0]
+        elif isinstance(slot, bool) or not isinstance(slot, int) or not 1 <= slot <= self.shelf_slots:
+            raise ValueError(f"slot must be 1 to {self.shelf_slots}")
+        elif slot in self._slot_map():
+            raise ValueError(f"slot {slot} already holds {self._slot_map()[slot].substrate_id}")
+        substrate.slot = slot
+        substrate.added_at = self.now
         self.substrates.append(substrate)
         route = ",".join(substrate.experiment_order)
-        self.events.append((self.now, "substrate_added", f"{substrate.substrate_id}:{route}"))
+        self.events.append((self.now, "substrate_added", f"{substrate.substrate_id}@{slot}:{route}"))
+        return slot
+
+    def add_samples(self, substrates: list[Substrate]) -> list[int]:
+        """Add several substrates to the first free slots; all or nothing."""
+        if len(substrates) > len(self.free_slots()):
+            raise ValueError(f"the shelf is full ({self.shelf_slots} slots)")
+        ids = [substrate.substrate_id for substrate in substrates]
+        duplicates = sorted({sample_id for sample_id in ids if ids.count(sample_id) > 1})
+        if duplicates:
+            raise ValueError(f"duplicate sample id: {', '.join(duplicates)}")
+        added: list[Substrate] = []
+        try:
+            for substrate in substrates:
+                self._place(substrate, None)
+                added.append(substrate)
+        except ValueError:
+            for substrate in added:
+                self.substrates.remove(substrate)
+            raise
+        if not self.stopped and not self.gantry_busy:
+            self._schedule_next_transport()
+        return [substrate.slot for substrate in substrates]
+
+    def _clearable(self, substrate: Substrate) -> Optional[str]:
+        """Why ``substrate`` cannot be cleared now, or None if it can."""
+        if self.stopped:
+            return None
+        if self._transport is not None and self._transport.substrate is substrate:
+            return "the gantry is moving it"
+        if substrate.location != "shelf":
+            return f"it is in {substrate.location}"
+        return None
+
+    def clear_slot(self, slot: int) -> Substrate:
+        """Remove the substrate in ``slot`` from the queue and the shelf view.
+
+        While the scheduler runs, only substrates sitting on the shelf can be
+        cleared (RuntimeError otherwise); after an emergency stop any can be,
+        once it has been taken out by hand. ValueError if the slot is empty.
+        """
+        substrate = self._slot_map().get(slot)
+        if substrate is None:
+            raise ValueError(f"slot {slot} is empty")
+        reason = self._clearable(substrate)
+        if reason is not None:
+            raise RuntimeError(f"cannot clear slot {slot}: {reason}")
+        self._remove(substrate)
+        return substrate
+
+    def clear_shelf(self) -> tuple[list[int], list[int]]:
+        """Clear every slot that can be cleared; returns ``(cleared, kept)`` slot numbers."""
+        cleared, kept = [], []
+        for substrate in sorted(self.substrates, key=lambda item: item.slot):
+            if self._clearable(substrate) is None:
+                self._remove(substrate)
+                cleared.append(substrate.slot)
+            else:
+                kept.append(substrate.slot)
+        return cleared, kept
+
+    def _remove(self, substrate: Substrate) -> None:
+        self.substrates.remove(substrate)
+        self._waiting.pop(substrate.substrate_id, None)
+        for client in self.clients.values():
+            # Only after a stop: the instrument itself stays occupied until it gets /taken.
+            if client.substrate is substrate:
+                client.substrate = None
+        self.events.append((self.now, "substrate_cleared", f"{substrate.substrate_id}@{substrate.slot}"))
+
+    def emergency_stop(self) -> list[str]:
+        """Halt scheduling now; return the names of clients holding a sample.
+
+        Nothing new is scheduled and the current gantry move is abandoned.
+        Samples stay where they are: in an instrument, on the shelf, or on the
+        gantry if it was carrying one. The caller sends the actual /stop to
+        the gantry and those clients. RuntimeError if already stopped.
+        """
+        if self.stopped:
+            raise RuntimeError("the scheduler is already stopped")
+        point = self._simulated_coordinates()
+        if self._transport is not None or self._manual_move is not None:
+            # Parked wherever it was, as far as the scheduler knows.
+            self._manual_point = point
+            self.position = MANUAL if point is not None else self.position
+        self._transport = None
+        self._manual_move = None
+        self._waiting.clear()
+        busy = [name for name, client in self.clients.items() if client.substrate is not None]
+        self.stopped = True
+        self.stopped_at = self.now
+        self.events.append((self.now, "scheduler_stopped", "emergency stop"))
+        return busy
+
+    def resume(self) -> None:
+        """Carry on scheduling after an emergency stop.
+
+        Samples left in an instrument are collected once that node says it is
+        done or stopped again; a sample that was on the gantry is taken to be
+        back on the shelf in its slot. RuntimeError if not stopped.
+        """
+        if not self.stopped:
+            raise RuntimeError("the scheduler is not stopped")
+        for substrate in self.substrates:
+            if substrate.location == "gantry":
+                substrate.location = "shelf"
+        self.stopped = False
+        self.stopped_at = None
+        self.events.append((self.now, "scheduler_resumed", ""))
         if not self.gantry_busy:
             self._schedule_next_transport()
+
+    def substrate_view(self, substrate: Substrate) -> dict[str, Any]:
+        if substrate.completed:
+            status = DONE
+        elif substrate.location == "gantry":
+            status = MOVING
+        elif substrate.location == "shelf":
+            status = QUEUED if substrate.current_experiment_index == 0 else WAITING
+        else:
+            status = IN_EXPERIMENT
+        moving = self._transport is not None and self._transport.substrate is substrate
+        return {
+            "id": substrate.substrate_id,
+            "slot": substrate.slot,
+            "route": list(substrate.experiment_order),
+            "step": substrate.current_experiment_index,
+            "next": substrate.next_experiment,
+            "location": substrate.location,
+            "status": status,
+            "picking_up": moving and self._transport.phase == "pickup",
+            "waiting_for_pickup": substrate.substrate_id in self._waiting and substrate.location != "shelf",
+            "completed": substrate.completed,
+            "metadata": substrate.metadata,
+            "added_at": substrate.added_at,
+        }
+
+    def shelf(self) -> dict[str, Any]:
+        """JSON-ready view of every shelf slot, for GET /shelf."""
+        taken = self._slot_map()
+        return {
+            "state": self.state,
+            "stopped_at": self.stopped_at,
+            "slots": self.shelf_slots,
+            "done": sum(substrate.completed for substrate in self.substrates),
+            "total": len(self.substrates),
+            "shelf": [
+                {"slot": slot, "substrate": self.substrate_view(taken[slot]) if slot in taken else None}
+                for slot in range(1, self.shelf_slots + 1)
+            ],
+        }
 
     def tick(self, now: float) -> None:
         """Advance the simulation to ``now`` and schedule available work."""
         if now < self.now:
             raise ValueError("simulation time cannot move backwards")
         self.now = now
-        self._collect_finished_clients()
-        if self._manual_move is not None and now >= self._manual_move.arrives_at:
+        running = not self.stopped
+        if running:
+            self._collect_finished_clients()
+        else:
+            # Keep node statuses fresh for the GUI, but start nothing.
+            for client in self.clients.values():
+                client.poll(now)
+        manual = self._manual_move
+        if manual is not None and now >= manual.arrives_at and self._gantry_done(manual.ticket):
             self._manual_point = self._manual_move.end
             self._manual_move = None
             self.position = MANUAL
             self.events.append((self.now, "gantry_manual_arrived", f"({self._manual_point[0]:g}, {self._manual_point[1]:g})"))
-        if self._transport is not None and now >= self._transport.arrives_at:
+        if not running:
+            return
+        transport = self._transport
+        if transport is not None and now >= transport.arrives_at and self._gantry_done(transport.ticket):
             self._finish_transport()
         if not self.gantry_busy:
             self._schedule_next_transport()
@@ -498,62 +736,53 @@ class GantryManager:
             phase=phase,
             arrives_at=self.now + self.movement_time,
         )
-        self._move_command(source)
+        self._transport.ticket = self._hand_command("pick", source, substrate)
         self.events.append((self.now, "gantry_departed", f"{source}->{destination}:{substrate.substrate_id}"))
 
     def _finish_transport(self) -> None:
+        """The gantry has finished the current pick or place: tell the station, then go on."""
         transport = self._transport
         assert transport is not None
-        self.position = transport.source if transport.phase == "pickup" else transport.destination
+        substrate = transport.substrate
 
         if transport.phase == "pickup":
-            if transport.source == "shelf":
-                transport.substrate.location = "gantry"
-                self._waiting.pop(transport.substrate.substrate_id, None)
-            else:
-                client = self.clients[transport.source]
+            self.position = transport.source
+            client = self.clients.get(transport.source)
+            if client is not None and client.substrate is substrate:
                 try:
-                    released = client.release(self.now)
+                    client.release(self.now)
                 except RuntimeError as error:
-                    # Leave the sample waiting; the next tick tries the pickup again.
-                    self._transport = None
-                    self.events.append((self.now, "pickup_failed", str(error)))
-                    return
-                if released is not transport.substrate:
-                    raise RuntimeError("client released the wrong substrate")
-                self._waiting.pop(transport.substrate.substrate_id, None)
-                transport.substrate.location = "gantry"
-            self._hand_command("pick", transport.source, transport.substrate)
+                    # The gantry holds the sample anyway; the node stays occupied until cleared.
+                    client.substrate = None
+                    self.events.append((self.now, "taken_failed", str(error)))
+            self._waiting.pop(substrate.substrate_id, None)
+            substrate.location = "gantry"
             transport.phase = "delivery"
             transport.arrives_at = self.now + self.movement_time
-            self._move_command(transport.destination)
-            self.events.append((self.now, "gantry_picked_up", transport.substrate.substrate_id))
+            transport.ticket = self._hand_command("place", transport.destination, substrate)
+            self.events.append((self.now, "gantry_picked_up", substrate.substrate_id))
             return
 
-        self._hand_command("place", transport.destination, transport.substrate)
+        self.position = transport.destination
         if transport.destination == "shelf":
-            if transport.substrate.next_experiment is None:
-                transport.substrate.mark_returned_to_shelf()
+            if substrate.next_experiment is None:
+                substrate.mark_returned_to_shelf()
             else:
-                transport.substrate.location = "shelf"
-                self._waiting[transport.substrate.substrate_id] = (
-                    transport.substrate,
-                    "shelf",
-                )
+                substrate.location = "shelf"
+                self._waiting[substrate.substrate_id] = (substrate, "shelf")
         else:
             client = self.clients[transport.destination]
             try:
-                client.start(transport.substrate, self.now)
+                client.start(substrate, self.now)
             except RuntimeError as error:
-                # The node would not take the sample, so carry it back to the shelf.
+                # The node would not take the sample, so pick it back up and carry it to the shelf.
                 self.events.append((self.now, "delivery_failed", str(error)))
-                self._hand_command("pick", transport.destination, transport.substrate)
                 transport.source = transport.destination
                 transport.destination = "shelf"
+                transport.phase = "pickup"
                 transport.arrives_at = self.now + self.movement_time
-                self._move_command("shelf")
+                transport.ticket = self._hand_command("pick", transport.source, substrate)
                 return
-            transport.substrate.mark_delivered(transport.destination)
-        self.position = transport.destination
-        self.events.append((self.now, "gantry_delivered", f"{transport.substrate.substrate_id}->{transport.destination}"))
+            substrate.mark_delivered(transport.destination)
+        self.events.append((self.now, "gantry_delivered", f"{substrate.substrate_id}->{transport.destination}"))
         self._transport = None

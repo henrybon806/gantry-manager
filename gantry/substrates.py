@@ -17,6 +17,9 @@ class Substrate:
     location: str = "shelf"
     completed: bool = False
     history: list[str] = field(default_factory=list)
+    # Shelf slot, numbered from 1; set when the scheduler takes the substrate.
+    slot: Optional[int] = None
+    added_at: Optional[float] = None
 
     @property
     def next_experiment(self) -> Optional[str]:
