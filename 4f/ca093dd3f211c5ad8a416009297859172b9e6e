@@ -1,0 +1,33 @@
+gantry/scheduler.py
+  s_c734aa779bc7af::t_4bb7ca3c6dd3df 78-115,738-741,743-748,750-758,761,763-856
+web/server.py
+  s_c734aa779bc7af::t_4bb7ca3c6dd3df 116-123,301
+gantry/server.py
+  s_c734aa779bc7af::t_4bb7ca3c6dd3df 34,215-218,338-340
+  s_c734aa779bc7af::t_62fbee1b562635 341
+tests/test_gantry.py
+  s_c734aa779bc7af::t_ec9bfd1713cd45 473-484,486-499,728-729
+  s_c734aa779bc7af::t_42a15e5cebca0d 485
+web/static/index.html
+  s_c734aa779bc7af::t_77e50d807f7396 1102-1105,1160,1165
+  s_c734aa779bc7af::t_ec4a86a906c3af 63-64,172-195,328-341,533,542,1097-1101,1106-1159,1161-1164,1166-1167
+  s_c734aa779bc7af::t_3463054d2211eb 1168
+README.md
+  s_c734aa779bc7af::t_77e50d807f7396 257-259,348-351
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "4fca093dd3f211c5ad8a416009297859172b9e6e",
+  "prompts": {},
+  "sessions": {
+    "s_c734aa779bc7af": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6dfe48e9-dc43-4041-9b56-c68ae57008fe",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Henry Bonomolo <hbono@berkeley.edu>"
+    }
+  }
+}
