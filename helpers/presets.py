@@ -89,6 +89,8 @@ def validate_presets(data: Any) -> dict[str, Any]:
     for entry in data.get("stations") or []:
         if not isinstance(entry, dict) or not isinstance(entry.get("name"), str) or not entry["name"].strip():
             raise ValueError("every station needs a name")
+        if "," in entry["name"]:
+            raise ValueError("station names cannot contain a comma: routes are comma-separated")
         point = _pair((entry.get("x"), entry.get("y")), f"{entry['name']} position")
         station_address = entry.get("address", "")
         if not isinstance(station_address, str):

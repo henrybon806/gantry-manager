@@ -541,6 +541,77 @@ class GantrySimulationTests(unittest.TestCase):
         finally:
             node.close()
 
+    def test_experiments_can_be_started_stopped_and_reset_by_hand(self):
+        from fastapi.testclient import TestClient
+
+        node = LiveNode("a", 30.0)
+        try:
+            manager = build_manager([f"A={node.address}@30,0"], None, movement_time=0.05)
+            scheduler = Scheduler(manager)
+            api = TestClient(create_app(scheduler))
+            scheduler.start()
+            try:
+                def post(action, **body):
+                    return api.post(f"/experiments/{action}", json={"name": "experiment_a", **body})
+
+                self.assertEqual(api.post("/experiments/frobnicate", json={"name": "experiment_a"}).status_code, 422)
+                self.assertEqual(post("reset", name="experiment_z").status_code, 422)
+                # A node with nothing in it: idle, so only start is possible.
+                self.assertEqual(post("stop").status_code, 409)
+                self.assertEqual(post("reset").status_code, 409)
+                started = post("start", sample_id="by_hand").json()
+                self.assertEqual((started["state"], started["status"]["sample_id"]), ("busy", "by_hand"))
+                self.assertEqual(post("start").status_code, 409)
+                # A hand-started node is occupied, so the scheduler sends it nothing.
+                api.post("/substrates", json={"route": "A", "id": "s1"})
+                time.sleep(0.3)
+                self.assertEqual(api.get("/shelf").json()["shelf"][0]["substrate"]["location"], "shelf")
+
+                self.assertIn(post("stop").json()["state"], ("stopping", "stopped"))
+                deadline = time.monotonic() + 3
+                while node.node.status()["state"] == "stopping" and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                self.assertEqual(post("reset").json()["state"], "idle")
+                # Free again: s1 is delivered and run.
+                deadline = time.monotonic() + 3
+                while node.node.status()["sample_id"] != "s1" and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                self.assertEqual(node.node.status()["sample_id"], "s1")
+
+                # Resetting a node that holds a sample leaves it waiting for the gantry.
+                self.assertEqual(post("stop").status_code, 200)
+                deadline = time.monotonic() + 3
+                while node.node.status()["state"] == "stopping" and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                self.assertEqual(post("reset").json()["state"], "idle")
+                deadline = time.monotonic() + 3
+                while api.get("/shelf").json()["shelf"][0]["substrate"]["location"] != "shelf" and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                substrate = api.get("/shelf").json()["shelf"][0]["substrate"]
+                self.assertEqual((substrate["location"], substrate["status"]), ("shelf", "done"))
+                # Renaming reaches the routes and the client, without a restart.
+                self.assertEqual(api.post("/experiments/rename",
+                                          json={"name": "experiment_a", "new_name": "keyence"}).json()["renamed"], True)
+                self.assertEqual(list(manager.clients), ["keyence"])
+                self.assertEqual(api.get("/shelf").json()["shelf"][0]["substrate"]["route"], ["keyence"])
+                self.assertIn("keyence", manager.locations)
+                self.assertEqual(api.post("/experiments/rename",
+                                          json={"name": "experiment_a", "new_name": "x"}).json()["renamed"], False)
+                self.assertEqual(api.post("/experiments/rename",
+                                          json={"name": "keyence", "new_name": "shelf"}).status_code, 409)
+                self.assertEqual(api.post("/experiments/start", json={"name": "keyence"}).json()["state"], "busy")
+                self.assertEqual(api.post("/experiments/reset", json={"name": "experiment_a"}).status_code, 422)
+                kinds = [event[1] for event in scheduler.snapshot()["events"]]
+                self.assertEqual(
+                    [kind for kind in ("node_started", "node_stopped", "node_reset", "node_reset_sample") if kind in kinds],
+                    ["node_started", "node_stopped", "node_reset", "node_reset_sample"],
+                )
+                self.assertNotIn("taken_failed", kinds)
+            finally:
+                scheduler.stop()
+        finally:
+            node.close()
+
     def test_poller_reads_nodes_and_gantry_position(self):
         gantry = serve_text(b'{"x": 12.5, "y": 3.0, "z": 0}')
         node = LiveNode("a", 5.0)
@@ -591,7 +662,7 @@ class WebGuiTests(unittest.TestCase):
 
         page = self.client.get("/")
         self.assertEqual(page.status_code, 200)
-        self.assertIn("Save presets", page.text)
+        self.assertIn("Save now", page.text)
 
         reply = self.client.get("/api/presets").json()
         self.assertEqual(reply["presets"], default_presets())
@@ -602,8 +673,12 @@ class WebGuiTests(unittest.TestCase):
         presets["shelf_slots"] = 4
         edited = self.client.put("/api/presets", json=presets).json()
         self.assertTrue(edited["unsaved"])
-        self.assertFalse(self.presets_path.exists())  # edits are not written until Save
+        self.assertFalse(self.presets_path.exists())  # the PUT alone does not write the file
         self.assertEqual(self.poller._gantry[1], "/position")
+        # Every change bumps the revision, so another open page knows to re-read.
+        self.assertEqual((reply["revision"], edited["revision"]), (0, 1))
+        self.assertEqual(self.client.put("/api/presets", json=presets).json()["revision"], 1)
+        self.assertEqual(self.client.get("/api/snapshot").json()["presets_revision"], 1)
 
         saved = self.client.post("/api/presets/save").json()
         self.assertFalse(saved["unsaved"])
@@ -616,6 +691,7 @@ class WebGuiTests(unittest.TestCase):
         reloaded = self.client.post("/api/presets/reload").json()
         self.assertEqual(reloaded["presets"]["bed"], [3000.0, 1000.0])
         self.assertFalse(reloaded["unsaved"])
+        self.assertEqual(reloaded["revision"], 3)
 
         for bad in ({"bed": [0, 10]}, {"shelf_slots": 0},
                     {"stations": [{"name": "home", "address": "", "x": 0, "y": 0}]}):
@@ -742,6 +818,37 @@ class WebGuiTests(unittest.TestCase):
             self.assertTrue(client.post("/api/stop").json()["ok"])
             self.assertIn("Refused", client.post("/api/stop").json()["message"])
             self.assertTrue(client.post("/api/resume").json()["ok"])
+            # Per-experiment controls reach the scheduler's clients by name.
+            refused = client.post("/api/experiments/start", json={"name": "experiment_a"}).json()
+            self.assertEqual(refused["ok"], False)
+            self.assertIn("did not start", refused["message"])
+            self.assertFalse(client.post("/api/experiments/reset", json={"name": "experiment_z"}).json()["ok"])
+            self.assertEqual(client.post("/api/experiments/wiggle", json={"name": "experiment_a"}).status_code, 422)
+            # Renaming goes through the GUI server: presets, scheduler and file in one step.
+            renamed = client.post("/api/experiments/rename", json={"name": "experiment_a", "new_name": "keyence"})
+            self.assertEqual(renamed.status_code, 200, renamed.text)
+            self.assertEqual([s["name"] for s in renamed.json()["presets"]["stations"]][1], "keyence")
+            self.assertEqual((renamed.json()["unsaved"], renamed.json()["note"]), (False, ""))
+            self.assertEqual([s["name"] for s in json.loads(self.presets_path.read_text())["stations"]][1], "keyence")
+            self.assertIn("keyence", manager.clients)
+            self.assertEqual(client.post("/api/experiments/rename", json={"name": "nope", "new_name": "x"}).status_code, 422)
+            self.assertEqual(client.post("/api/experiments/rename",
+                                         json={"name": "keyence", "new_name": "experiment_b"}).status_code, 422)
+
+            # The settings are the experiment list: the running scheduler follows them.
+            presets = client.get("/api/presets").json()["presets"]
+            self.assertEqual(sorted(manager.clients), ["experiment_b", "experiment_c", "keyence"])
+            presets["stations"] = [s for s in presets["stations"] if s["name"] in ("shelf", "keyence")]
+            removed = client.put("/api/presets", json=presets).json()["stations"]
+            self.assertEqual(sorted(removed["removed"]), ["experiment_b", "experiment_c"])
+            self.assertEqual(list(manager.clients), ["keyence"])
+            # keyence is listening on a different port here, so the scheduler would
+            # rebuild it: it cannot, because sample_1 is still routed through it.
+            self.assertIn("still in the route of sample_1", removed["kept"][0])
+            presets["stations"].append({"name": "experiment_d", "address": "127.0.0.1:8099", "x": 10.0, "y": 20.0})
+            added = client.put("/api/presets", json=presets).json()["stations"]
+            self.assertEqual((added["added"], added["removed"]), (["experiment_d"], []))
+            self.assertEqual(manager.locations["experiment_d"], (10.0, 20.0))
 
             self.assertEqual(client.post("/api/move", json={"x": 5, "y": 5}).json(), {"ok": True, "message": "Moving"})
             self.assertIn("Refused", client.post("/api/move", json={"x": 1, "y": 1}).json()["message"])

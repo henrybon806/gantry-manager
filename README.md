@@ -83,7 +83,7 @@ sim/               fake hardware for running without a lab, one terminal each
 tests/             unit and end-to-end tests
 legacy/            the old Tkinter GUI and the timer prototype, kept for reference
 data/              your settings
-  presets.json       written by the GUI's Save presets, read by the gantry and the GUI
+  presets.json       saved by the GUI as you edit, read by the gantry and the GUI
   gantry_layout.json older settings file, imported once if presets.json is missing
 assets/            screenshots
 main.py            the normal way to run: scheduler + gantry API + GUI in one process
@@ -269,6 +269,15 @@ curl -X DELETE $S/shelf
 # Emergency stop, and carry on afterwards.
 curl -X POST $S/stop
 curl -X POST $S/resume
+
+# Drive one experiment node by hand: start a run, stop it, or reset it.
+# Reset is POST /taken on that node: the way out of error or stopped without
+# restarting anything. Without "sample_id", start uses the node's current
+# sample if the scheduler has one there, else "manual".
+curl -X POST $S/experiments/start -H 'content-type: application/json' \
+  -d '{"name": "experiment_a", "sample_id": "wafer_12"}'
+curl -X POST $S/experiments/stop  -H 'content-type: application/json' -d '{"name": "experiment_a"}'
+curl -X POST $S/experiments/reset -H 'content-type: application/json' -d '{"name": "experiment_a"}'
 ```
 
 Interactive docs for all of it are at http://127.0.0.1:8080/scheduler/docs
@@ -292,6 +301,28 @@ taking that substrate out by hand). `POST /resume` carries on. A substrate left
 in a stopped instrument is collected once that node reports stopped or done.
 One that was on the gantry is assumed to be back in its shelf slot, so put
 it there before resuming.
+
+`POST /experiments/stations` makes the scheduler's experiments match the list
+it is given: it adds the ones it does not have, drops the ones that are gone,
+rebuilds one whose address changed, and moves the rest on the bed. It answers
+with `added`, `removed` and `kept` (the ones it would not let go of yet, and
+why). The GUI sends it every time the settings change, so the experiment list
+in the page is the one the scheduler uses.
+
+`POST /experiments/rename` renames an experiment in the running scheduler:
+its spot on the bed, the routes of the substrates already on the shelf, and
+anything waiting for the gantry follow it. `renamed` is false when the
+scheduler has no such experiment (one added to the presets since it started).
+It is refused while the gantry is in a move involving that station, or when
+the new name is taken, `home`, `shelf` or has a comma in it. Through the GUI
+server, `POST /api/experiments/rename` does the presets, the scheduler and
+`presets.json` in one step.
+
+A node only takes what its state allows: start needs it idle, stop needs it
+running, and reset needs it done, stopped or error; anything else gets 409. An
+unknown experiment or action gets 422. Resetting a node the scheduler had a
+sample in leaves that sample waiting for the gantry to fetch it, since the node
+has let go of it.
 
 With `LABNODE_TOKEN` set, the POST and DELETE endpoints need
 `Authorization: Bearer $LABNODE_TOKEN`.
@@ -348,7 +379,12 @@ slot on the shelf, and *Emergency stop* / *Resume* stop and restart
 scheduling. The **Scheduler** card (with the settings) shows what the gantry is doing
 now, what each instrument holds, the upcoming moves in the order the scheduler
 will take them (each with what it is waiting for), and recent events; the same
-data is at `GET /scheduler/plan`. *API docs* in the header opens the scheduler's `/docs`. Settings
+data is at `GET /scheduler/plan`.
+
+Each experiment box on the bed carries ▶ start, ■ stop and ⟲ reset for driving
+that node by hand; only the ones its current state allows are enabled, and the
+result appears under the bed. ⟲ reset sends `POST /taken`, which is how you get
+a node out of an `error` or `stopped` state without restarting anything. *API docs* in the header opens the scheduler's `/docs`. Settings
 are in cards below, and durations come from each node.
 
 - **Gantry**: the gantry node's address (empty to only simulate the gantry),
@@ -356,17 +392,32 @@ are in cards below, and durations come from each node.
 - **Move gantry**: type x, y in mm and press *Move gantry*, or double-click an
   empty spot on the bed. The reply shows, e.g. *Refused: gantry is busy moving*.
 - **Bed & shelf**: bed size in mm and the number of shelf slots.
-- **Experiments**: set each node address (`http://host:port`, `host:port` or a
-  port), drag boxes to place them, and add or remove experiments.
-- Edits apply straight away (every open tab sees them) but are only written
-  to disk when you press **Save presets**. *Reload* throws away unsaved edits.
+- **Experiments**: rename one by typing over its name, set each node address
+  (`http://host:port`, `host:port` or a port), drag boxes to place them, and add
+  or remove experiments. Names must be unique, cannot be `home` and cannot
+  contain a comma (routes are comma-separated). Everything here reaches the
+  running scheduler at once, with nothing to restart: a rename carries the
+  routes of the substrates already on the shelf with it, an experiment added
+  starts being scheduled, one removed stops, and a new node address is picked
+  up. An experiment that holds a sample, or that an unfinished substrate still
+  has in its route, keeps running until it is free, and then goes.
+- Edits apply straight away and are written to `presets.json` a moment later,
+  so nothing has to be saved by hand. Every open tab follows along: a page whose
+  settings are out of date re-reads them instead of writing its own copy back.
+  *Save now* writes the file immediately; *Reload* re-reads it.
 
 The server's API, if you want to script it:
 
 ```text
 GET  /api/presets    PUT /api/presets    POST /api/presets/save    POST /api/presets/reload
 GET  /api/snapshot   POST /api/move {"x", "y"}   GET /api/gantry/stream (main.py only)
+     (/api/presets and /api/snapshot carry a "revision" that changes with every settings edit)
+POST /api/experiments/{start|stop|reset} {"name", "sample_id"}
+POST /api/experiments/rename {"name", "new_name"}
 ```
+
+Changing an experiment in the settings also syncs it to the scheduler; the
+PUT and the snapshot answer with what that did (`stations`).
 
 The older Tkinter window (`python -m legacy.gantry_gui`) still works but keeps its
 own `data/gantry_layout.json`.
@@ -374,7 +425,7 @@ own `data/gantry_layout.json`.
 ## Presets
 
 `data/presets.json` holds everything you would otherwise re-enter each run. Edit
-it in the web GUI and press **Save presets**; `main.py` (and
+it in the web GUI and it saves itself; `main.py` (and
 `python -m gantry`, `python -m web`) read it at startup (`--presets` to use another file).
 
 ```json
@@ -422,9 +473,14 @@ That is expected: `python main.py` and each experiment are servers that run unti
 
 Nothing is listening at those addresses. Start the experiments and `main.py` in their own terminals and check the ports match the addresses in the GUI.
 
-### A node stays DONE after restarting the gantry
+### A node is stuck in DONE, STOPPED or ERROR
 
-A node keeps its sample until something calls `POST /taken`. If the gantry restarts mid-run it no longer knows that sample, so restart that node too.
+A node keeps its sample until something calls `POST /taken`. If the gantry
+restarts mid-run it no longer knows that sample, so nothing collects it. Press
+⟲ on that instrument in the **Scheduler** card (or `POST
+/scheduler/experiments/reset`) to send `/taken` and put it back to idle; no
+server needs restarting. Take the sample out by hand first if it is still
+sitting in the instrument.
 
 ### Tkinter is unavailable
 

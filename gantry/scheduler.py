@@ -40,6 +40,10 @@ HOME = "home"
 # Position name after a manual move: parked at a free point, not a location.
 MANUAL = "manual"
 MAX_SAMPLES = 30
+# Driving one experiment node by hand, from the GUI or POST /experiments/{action}.
+NODE_ACTIONS = ("start", "stop", "reset")
+# Sample id a hand-started node gets when nothing else is known.
+MANUAL_SAMPLE = "manual"
 
 # Scheduler states: nothing left to do, substrates moving or running, or
 # halted by an emergency stop until resumed.
@@ -108,6 +112,14 @@ def describe_event(kind: str, detail: str) -> str:
         "taken_failed": "Pickup not confirmed:",
         "node_stopped": "Stopped",
         "node_stop_failed": "Stop failed:",
+        "node_started": "Started by hand:",
+        "node_reset": "Reset by hand:",
+        "node_reset_sample": "Waiting for pickup after a reset:",
+        "experiment_renamed": "Renamed",
+        "experiment_added": "Added experiment",
+        "experiment_removed": "Removed experiment",
+        "node_start_failed": "Start failed:",
+        "node_reset_failed": "Reset failed:",
     }
     label = labels.get(kind, kind.replace("_", " "))
     return f"{label} {detail}".strip() if kind != "scheduler_stopped" else label
@@ -642,6 +654,148 @@ class GantryManager:
         self.events.append((self.now, "scheduler_resumed", ""))
         if not self.gantry_busy:
             self._schedule_next_transport()
+
+    def add_client(self, client: Client, point: Optional[Point] = None) -> None:
+        """Put a new experiment in the running scheduler, at bed ``point``.
+
+        RuntimeError if the name is taken or reserved, or if the bed has
+        locations and no point was given.
+        """
+        name = client.name
+        if name in self.clients:
+            raise RuntimeError(f"{name} is already there")
+        if name in (HOME, "shelf", MANUAL):
+            raise RuntimeError(f"{name} is not a usable experiment name")
+        if self.locations and point is None:
+            raise RuntimeError(f"no location for {name}")
+        self.clients[name] = client
+        if point is not None and self.locations:
+            self.locations[name] = point
+        self.events.append((self.now, "experiment_added", name))
+        if not self.stopped and not self.gantry_busy:
+            self._schedule_next_transport()
+
+    def remove_client(self, name: str) -> Client:
+        """Take an experiment out of the running scheduler and hand it back to be closed.
+
+        Refused while it holds a sample, while the gantry is in a move
+        involving it, or while a substrate that has not finished still has it
+        left in its route: those samples would have nowhere to go.
+        """
+        client = self.clients.get(name)
+        if client is None:
+            raise ValueError(f"unknown experiment: {name}")
+        if client.substrate is not None:
+            raise RuntimeError(f"{name} has {client.substrate.substrate_id} in it")
+        if self._transport is not None and name in (self._transport.source, self._transport.destination):
+            raise RuntimeError(f"the gantry is in a move involving {name}")
+        booked = [
+            substrate.substrate_id for substrate in self.substrates
+            if not substrate.completed and name in substrate.experiment_order[substrate.current_experiment_index:]
+        ]
+        if booked:
+            raise RuntimeError(f"{name} is still in the route of {', '.join(booked)}")
+        del self.clients[name]
+        self.locations.pop(name, None)
+        self._waiting = {
+            sample: (substrate, source) for sample, (substrate, source) in self._waiting.items() if source != name
+        }
+        self.events.append((self.now, "experiment_removed", name))
+        return client
+
+    def move_client(self, name: str, point: Point) -> None:
+        """Move an experiment's spot on the bed, as the GUI's boxes are dragged."""
+        if name in self.clients and self.locations:
+            self.locations[name] = point
+
+    def rename_client(self, old: str, new: str) -> bool:
+        """Rename one experiment while the scheduler runs; True if it knew that name.
+
+        Everything that names the station follows it: its location on the bed,
+        the routes of the substrates already on the shelf, where each of them
+        is, and what is waiting for the gantry. False (and no change) when the
+        scheduler has no such client, e.g. a station added to the presets since
+        it started. RuntimeError if the new name cannot be used, or while the
+        gantry is in a move that involves that station.
+        """
+        new = new.strip()
+        if old not in self.clients:
+            return False
+        if new == old:
+            return True
+        if not new:
+            raise RuntimeError("an experiment needs a name")
+        if "," in new:
+            raise RuntimeError("experiment names cannot contain a comma: routes are comma-separated")
+        if new in (HOME, "shelf", MANUAL) or new in self.clients:
+            raise RuntimeError(f"{new} is already taken")
+        if self._transport is not None and old in (self._transport.source, self._transport.destination):
+            raise RuntimeError(f"the gantry is in a move involving {old}; try again in a moment")
+        client = self.clients[old]
+        client.name = new
+        self.clients = {(new if name == old else name): value for name, value in self.clients.items()}
+        if old in self.locations:
+            self.locations[new] = self.locations.pop(old)
+        if self.position == old:
+            self.position = new
+        for substrate in self.substrates:
+            substrate.experiment_order = tuple(new if step == old else step for step in substrate.experiment_order)
+            substrate.history = [new if step == old else step for step in substrate.history]
+            if substrate.location == old:
+                substrate.location = new
+        self._waiting = {
+            sample: (substrate, new if source == old else source)
+            for sample, (substrate, source) in self._waiting.items()
+        }
+        self.events.append((self.now, "experiment_renamed", f"{old} -> {new}"))
+        return True
+
+    def node_action(self, name: str, action: str, sample_id: Optional[str] = None) -> dict[str, Any]:
+        """Drive one experiment node by hand: ``start``, ``stop`` or ``reset``.
+
+        ``start`` sends POST /start (the node's own sample if the scheduler
+        has one there, else ``sample_id`` or ``manual``), ``stop`` sends
+        POST /stop, and ``reset`` sends POST /taken, which is the way out of
+        an ``error`` or ``stopped`` node without restarting anything. A
+        sample the scheduler had in a node it resets is left waiting for the
+        gantry to fetch it, because the node has let go of it.
+
+        Returns the node's new /status. ValueError for an unknown experiment
+        or action; RuntimeError if the node has no address, or refused.
+        """
+        if action not in NODE_ACTIONS:
+            raise ValueError(f"unknown action {action!r}: expected one of {', '.join(NODE_ACTIONS)}")
+        client = self.clients.get(name)
+        if client is None:
+            raise ValueError(f"unknown experiment: {name}")
+        node = getattr(client, "node", None)
+        if node is None:
+            raise RuntimeError(f"{name} is simulated in this process, so there is no node to {action}")
+        held = client.substrate
+        sample = (sample_id or "").strip() or (held.substrate_id if held is not None else MANUAL_SAMPLE)
+        try:
+            if action == "start":
+                status = node.start(sample)
+            elif action == "stop":
+                status = node.stop()
+            else:
+                status = node.taken()
+        except (NodeError, NodeUnreachable, ValueError) as error:
+            self.events.append((self.now, f"node_{action}_failed", f"{name}: {error}"))
+            raise RuntimeError(f"{name} did not {action}: {error}") from None
+        client.status = status
+        client.listener.update(status)
+        kind = {"start": "node_started", "stop": "node_stopped", "reset": "node_reset"}[action]
+        self.events.append((self.now, kind, f"{name} ({sample})" if action == "start" else name))
+        if action == "reset" and held is not None:
+            # The node is idle again but the sample is still sitting in it, so
+            # the gantry has to come and collect it.
+            client.substrate = None
+            self._waiting[held.substrate_id] = (held, name)
+            self.events.append((self.now, "node_reset_sample", f"{held.substrate_id} in {name}"))
+            if not self.stopped and not self.gantry_busy:
+                self._schedule_next_transport()
+        return status
 
     def substrate_view(self, substrate: Substrate) -> dict[str, Any]:
         if substrate.completed:

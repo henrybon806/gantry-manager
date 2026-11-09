@@ -37,6 +37,11 @@ serves its own state on --port (default 8200):
     DELETE /shelf               clear every slot whose substrate is on the shelf
     POST   /stop                emergency stop: halt scheduling, /stop the gantry and busy instruments
     POST   /resume              carry on after a stop
+    POST   /experiments/stations  {"stations": [{"name", "address", "point"}]} make the experiment list match
+    POST   /experiments/rename  {"name": "experiment_a", "new_name": "keyence"} rename it without restarting
+    POST   /experiments/start   {"name": "experiment_a", "sample_id": opt} run that node by hand
+    POST   /experiments/stop    {"name": "experiment_a"} stop that node's run
+    POST   /experiments/reset   {"name": "experiment_a"} POST /taken on it: out of error or stopped, back to idle
 
 A route is a list of experiments (letters or station names) or "A,B,C".
 Slots are numbered from 1; without one, a substrate takes the first free
@@ -51,14 +56,15 @@ import threading
 import time
 import traceback
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
 
 from gantry.link import GantryLink
-from gantry.scheduler import ExperimentClient, HOME, GantryManager, Point, RemoteExperiment, parse_route
+from gantry.scheduler import ExperimentClient, HOME, GantryManager, NODE_ACTIONS, Point, RemoteExperiment, parse_route
 from gantry.substrates import Substrate
 from helpers.presets import PRESETS_PATH, load_presets, station_bed_to_raw
+from labnode.client import normalize_url
 from labnode.server import LOOPBACK_HOSTS, TOKEN_ENV
 
 
@@ -151,6 +157,33 @@ class MoveRequest(BaseModel):
     y: float
 
 
+class StationSpec(BaseModel):
+    """One experiment the running scheduler should have."""
+
+    name: str
+    address: str = Field(description="Its labnode address; an experiment without one is not scheduled")
+    point: Optional[list[float]] = Field(None, description="Where it sits, in gantry coordinates")
+
+
+class StationsRequest(BaseModel):
+    stations: list[StationSpec] = Field(description="The experiments the scheduler should have, in full")
+
+
+class RenameRequest(BaseModel):
+    """Which experiment to rename, and to what."""
+
+    name: str = Field(description="The experiment's current name")
+    new_name: str = Field(description="Its new name: unique, no comma, and not home or shelf")
+
+
+class NodeActionRequest(BaseModel):
+    """Which experiment node to drive by hand."""
+
+    name: str = Field(description="The experiment's name, e.g. experiment_a")
+    sample_id: Optional[str] = Field(
+        None, description='For start: the sample to run. Without one, the node\'s current sample, else "manual"')
+
+
 class SubstrateSpec(BaseModel):
     """One substrate to put on the shelf."""
 
@@ -231,6 +264,72 @@ class Scheduler:
         with self.lock:
             cleared, kept = self.manager.clear_shelf()
             return {**self.manager.shelf(), "cleared": cleared, "kept": kept}
+
+    def apply_stations(self, stations: list[Any]) -> dict[str, list[str]]:
+        """Make the running scheduler's experiments match ``stations`` (name, address, point).
+
+        Adds the ones it does not have, drops the ones that are gone, builds a
+        fresh client for one whose address changed, and moves the rest on the
+        bed. One that is busy or still has samples routed through it is left
+        alone and named in ``kept``, with why.
+        """
+        token = os.environ.get(TOKEN_ENV) or None
+        wanted: dict[str, tuple[str, Optional[Point]]] = {}
+        for station in stations:
+            entry = station if isinstance(station, dict) else station.model_dump()
+            point = entry.get("point")
+            wanted[entry["name"]] = (entry["address"], None if point is None else (float(point[0]), float(point[1])))
+        report: dict[str, list[str]] = {"added": [], "removed": [], "kept": []}
+        retired = []
+        with self.lock:
+            for name in list(self.manager.clients):
+                address = wanted.get(name, (None, None))[0]
+                if address is not None and not self._address_changed(self.manager.clients[name], address):
+                    continue
+                try:
+                    retired.append(self.manager.remove_client(name))
+                except RuntimeError as error:
+                    report["kept"].append(f"{name}: {error}")
+                    wanted.pop(name, None)
+                    continue
+                report["removed"].append(name)
+            for name, (address, point) in wanted.items():
+                if name in self.manager.clients:
+                    if point is not None:
+                        self.manager.move_client(name, point)
+                    continue
+                try:
+                    self.manager.add_client(RemoteExperiment(name, address, token=token), point)
+                except (RuntimeError, ValueError) as error:
+                    report["kept"].append(f"{name}: {error}")
+                    continue
+                report["added"].append(name)
+        for client in retired:
+            client.close()
+        return report
+
+    @staticmethod
+    def _address_changed(client: Any, address: str) -> bool:
+        """True when ``client`` is no longer pointed at ``address`` (so it has to be rebuilt)."""
+        current = getattr(client, "url", None)
+        if current is None:
+            return False
+        try:
+            return normalize_url(address) != current
+        except ValueError:
+            return True
+
+    def rename_client(self, name: str, new_name: str) -> dict[str, Any]:
+        """Rename one experiment in the running scheduler; ``renamed`` is False if it has no such client."""
+        with self.lock:
+            renamed = self.manager.rename_client(name, new_name)
+        return {"from": name, "to": new_name, "renamed": renamed, "experiments": list(self.manager.clients)}
+
+    def node_action(self, name: str, action: str, sample_id: Optional[str] = None) -> dict[str, Any]:
+        """Start, stop or reset one experiment node by hand; returns its new /status."""
+        with self.lock:
+            status = self.manager.node_action(name, action, sample_id)
+        return {"name": name, "action": action, "state": status.get("state"), "status": status}
 
     def resume(self) -> dict[str, Any]:
         with self.lock:
@@ -358,6 +457,23 @@ def create_app(scheduler: Scheduler, token: Optional[str] = None):
               summary="Emergency stop: halt scheduling and /stop the gantry and busy instruments")
     def post_stop() -> dict[str, Any]:
         return call(scheduler.emergency_stop)
+
+    # Declared before /experiments/{action} so these are not read as actions.
+    @app.post("/experiments/stations", dependencies=[Depends(authorize)],
+              summary="Make the running scheduler's experiments match this list: add, drop, re-point, move")
+    def post_experiment_stations(request: StationsRequest) -> dict[str, list[str]]:
+        return call(scheduler.apply_stations, request.stations)
+
+
+    @app.post("/experiments/rename", dependencies=[Depends(authorize)],
+              summary="Rename one experiment in the running scheduler, routes and all")
+    def post_experiment_rename(request: RenameRequest) -> dict[str, Any]:
+        return call(scheduler.rename_client, request.name, request.new_name)
+
+    @app.post("/experiments/{action}", dependencies=[Depends(authorize)],
+              summary="Drive one experiment node by hand: start a run, stop it, or reset it with /taken")
+    def post_experiment_action(action: Literal[NODE_ACTIONS], request: NodeActionRequest) -> dict[str, Any]:
+        return call(scheduler.node_action, request.name, action, request.sample_id)
 
     @app.post("/resume", dependencies=[Depends(authorize)], summary="Carry on scheduling after a stop")
     def post_resume() -> dict[str, Any]:

@@ -21,6 +21,11 @@ forwards gantry moves to POST /pos.
     DELETE /api/shelf/{slot}   -> scheduler DELETE /shelf/{slot}
     DELETE /api/shelf          -> scheduler DELETE /shelf
     POST /api/stop, /api/resume -> scheduler POST /stop, /resume
+    POST /api/experiments/{start|stop|reset}  {"name", "sample_id"} -> scheduler POST /experiments/{action}
+    POST /api/experiments/rename  {"name", "new_name"} rename it here and in the running scheduler
+
+Adding or removing an experiment in the settings reaches the running scheduler
+too: every change to them is sent on as scheduler POST /experiments/stations.
 """
 
 from __future__ import annotations
@@ -30,15 +35,17 @@ import asyncio
 import json
 import os
 import threading
+import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ValidationError
 
-from gantry.scheduler import NOT_STARTED
-from gantry.server import SubstrateSpec
+from gantry.scheduler import NODE_ACTIONS, NOT_STARTED
+from gantry.server import NodeActionRequest, RenameRequest, SubstrateSpec
 from helpers.polling import NodePoller, fetch
-from helpers.presets import DATA_DIR, LAYOUT_PATH, PRESETS_PATH, load_presets, poll_targets, save_presets, validate_presets
+from helpers.presets import (DATA_DIR, LAYOUT_PATH, PRESETS_PATH, load_presets, poll_targets, save_presets,
+                             station_bed_to_raw, validate_presets)
 from labnode import NodeClient, NodeError, NodeUnreachable
 from labnode.server import TOKEN_ENV
 
@@ -77,6 +84,11 @@ class PresetsStore:
         self.scheduler = scheduler
         self.path = path
         self._lock = threading.Lock()
+        # Bumped on every change, so an open page can tell its copy is stale.
+        self._revision = 0
+        # What the last settings change did to the scheduler's experiments.
+        self.stations: dict[str, list[str]] = {"added": [], "removed": [], "kept": []}
+        self._retry_at = 0.0
         self._presets = load_presets(path, legacy_path)
         self._saved = self._presets if path.exists() else None
         self._retarget(self._presets)
@@ -84,6 +96,24 @@ class PresetsStore:
     def _retarget(self, presets: dict[str, Any]) -> None:
         if self.poller is not None:
             self.poller.set_targets(*poll_targets(presets))
+
+    def sync_stations(self, presets: dict[str, Any]) -> dict[str, list[str]]:
+        """Make the scheduler's experiments match the settings: added, removed, moved.
+
+        The scheduler works in gantry coordinates, so each spot goes through
+        the saved calibration first. ``kept`` names any experiment it would not
+        let go of yet (busy, or samples still routed through it).
+        """
+        stations = [
+            {"name": station["name"], "address": station["address"],
+             "point": list(station_bed_to_raw(presets, [station["x"], station["y"]]))}
+            for station in presets["stations"]
+            if station["name"] != "shelf" and station["address"]
+        ]
+        reply = self.shelf_action("POST", "/experiments/stations", {"stations": stations})
+        if not reply["ok"]:
+            return {"added": [], "removed": [], "kept": [reply["message"]] if self.scheduler is not None else []}
+        return reply["result"]
 
     def readings(self) -> tuple[dict[str, dict[str, Any]], tuple[Any, str, str]]:
         """``(statuses by station, (gantry payload, problem, detail))`` for the page."""
@@ -127,6 +157,38 @@ class PresetsStore:
             return scheduler_action(self.scheduler, method, path, body)
         return forward_action(self.get()["scheduler_address"], method, path, body)
 
+    def rename_station(self, old: str, new: str) -> tuple[dict[str, Any], str]:
+        """Rename a station in the presets and in the running scheduler, then save.
+
+        Returns ``(presets, note)``; ``note`` says the scheduler could not be
+        told, so it keeps the old name until it restarts. ValueError if the new
+        name is not usable, RuntimeError if the scheduler refused it.
+        """
+        presets = self.get()
+        entry = next((station for station in presets["stations"] if station["name"] == old), None)
+        if entry is None:
+            raise ValueError(f"unknown experiment: {old}")
+        if old == "shelf":
+            raise ValueError("the shelf cannot be renamed")
+        candidate = validate_presets({
+            **presets,
+            "stations": [
+                {**station, "name": new} if station["name"] == old else station
+                for station in presets["stations"]
+            ],
+        })
+        reply = self.shelf_action("POST", "/experiments/rename", {"name": old, "new_name": new})
+        if not reply["ok"] and reply["message"].startswith("Refused"):
+            raise RuntimeError(reply["message"])
+        self.replace(candidate)
+        self.save()
+        note = ""
+        if not reply["ok"]:
+            note = f"The scheduler keeps {old} until it restarts: {reply['message']}"
+        elif entry["address"] and not (reply.get("result") or {}).get("renamed"):
+            note = f"The running scheduler has no {old}; it takes {new} when main.py restarts."
+        return self.get(), note
+
     def gantry_reading(self) -> dict[str, Any]:
         """The gantry's position as the scheduler has it right now (main.py only)."""
         pos = self.scheduler.pos()
@@ -143,6 +205,12 @@ class PresetsStore:
             self.poller.close()
 
     @property
+    def revision(self) -> int:
+        """How many times the settings have changed, for pages to compare against."""
+        with self._lock:
+            return self._revision
+
+    @property
     def unsaved(self) -> bool:
         with self._lock:
             return self._presets != self._saved
@@ -151,11 +219,26 @@ class PresetsStore:
         with self._lock:
             return self._presets
 
+    def retry_stations(self) -> None:
+        """Try again, about once a second, for an experiment the scheduler would not let go of.
+
+        Removing one that is busy or still in a route is not refused outright,
+        it just waits: this is what eventually carries it out.
+        """
+        if not self.stations["kept"] or time.monotonic() < self._retry_at:
+            return
+        self._retry_at = time.monotonic() + 1.0
+        self.stations = self.sync_stations(self.get())
+
     def replace(self, data: Any) -> dict[str, Any]:
+        """Take new settings. The running scheduler's experiment list follows them."""
         presets = validate_presets(data)
         with self._lock:
+            changed = presets != self._presets
             self._presets = presets
+            self._revision += changed
             self._retarget(presets)
+        self.stations = self.sync_stations(presets)
         return presets
 
     def save(self) -> dict[str, Any]:
@@ -167,6 +250,7 @@ class PresetsStore:
     def reload(self) -> dict[str, Any]:
         presets = load_presets(self.path, legacy_path=None)
         with self._lock:
+            self._revision += presets != self._presets
             self._presets = presets
             self._saved = presets if self.path.exists() else None
             self._retarget(presets)
@@ -197,6 +281,13 @@ def scheduler_action(scheduler: Any, method: str, path: str, body: Any = None) -
             result = scheduler.emergency_stop()
         elif (method, path) == ("POST", "/resume"):
             result = scheduler.resume()
+        elif (method, path) == ("POST", "/experiments/stations"):
+            result = scheduler.apply_stations(body["stations"])
+        elif (method, path) == ("POST", "/experiments/rename"):
+            result = scheduler.rename_client(body["name"], body["new_name"])
+        elif method == "POST" and path.startswith("/experiments/"):
+            body = body or {}
+            result = scheduler.node_action(body.get("name"), path.rsplit("/", 1)[1], body.get("sample_id"))
         else:
             raise ValueError(f"unknown action {method} {path}")
     except RuntimeError as error:
@@ -263,7 +354,8 @@ def create_app(store: PresetsStore):
         file_label = str(store.path)
 
     def presets_reply(presets: dict[str, Any]) -> dict[str, Any]:
-        return {"presets": presets, "unsaved": store.unsaved, "file": file_label}
+        return {"presets": presets, "unsaved": store.unsaved, "file": file_label, "revision": store.revision,
+                "stations": store.stations}
 
     @app.get("/api/presets")
     def get_presets() -> dict[str, Any]:
@@ -292,6 +384,7 @@ def create_app(store: PresetsStore):
 
     @app.get("/api/snapshot")
     def get_snapshot() -> dict[str, Any]:
+        store.retry_stations()
         statuses, (payload, problem, detail) = store.readings()
         return {
             "statuses": statuses,
@@ -300,6 +393,8 @@ def create_app(store: PresetsStore):
             "shelf": store.shelf(),
             "plan": store.plan(),
             "unsaved": store.unsaved,
+            "presets_revision": store.revision,
+            "stations": store.stations,
         }
 
     @app.get("/api/gantry/stream")
@@ -343,6 +438,24 @@ def create_app(store: PresetsStore):
     @app.post("/api/stop", summary="Emergency stop (scheduler POST /stop)")
     def post_stop() -> dict[str, Any]:
         return store.shelf_action("POST", "/stop")
+
+    @app.post("/api/experiments/rename",
+              summary="Rename an experiment in the presets and in the running scheduler")
+    def post_rename(request: RenameRequest) -> dict[str, Any]:
+        try:
+            presets, note = store.rename_station(request.name, request.new_name.strip())
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from None
+        except RuntimeError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from None
+        except OSError as error:
+            raise HTTPException(status_code=500, detail=f"could not write {store.path.name}: {error}") from None
+        return {**presets_reply(presets), "note": note}
+
+    @app.post("/api/experiments/{action}",
+              summary="Start, stop or reset one experiment node by hand (scheduler POST /experiments/{action})")
+    def post_experiment_action(action: Literal[NODE_ACTIONS], request: NodeActionRequest) -> dict[str, Any]:
+        return store.shelf_action("POST", f"/experiments/{action}", request.model_dump())
 
     @app.post("/api/resume", summary="Carry on after an emergency stop (scheduler POST /resume)")
     def post_resume() -> dict[str, Any]:

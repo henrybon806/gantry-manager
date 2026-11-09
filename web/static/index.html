@@ -52,6 +52,18 @@
     height: 420px;
   }
   #bed { position: absolute; inset: 0; width: 100%; height: 100%; user-select: none; touch-action: none; }
+  /* Start / stop / reset along the bottom of each experiment box. The layer
+     itself lets pointer events through, so dragging and double-click still work. */
+  #node-controls { position: absolute; inset: 0; pointer-events: none; }
+  #node-controls .node-actions { position: absolute; transform: translateX(-50%); display: flex; gap: 2px; }
+  #node-controls button {
+    pointer-events: auto; font: 10px Menlo, monospace; line-height: 1;
+    padding: 2px 6px; border-radius: 3px; background: var(--card);
+    border-color: var(--line); color: var(--text);
+  }
+  #node-controls button.go:hover:not(:disabled) { color: var(--ok); border-color: var(--ok); }
+  #node-controls button.halt:hover:not(:disabled) { color: var(--bad); border-color: var(--bad); }
+  #node-message { min-height: 15px; padding: 5px 14px 0; }
   /* Shapes are redrawn every poll; hit-testing is done in script against the svg itself. */
   #bed * { pointer-events: none; }
   #settings {
@@ -112,12 +124,23 @@
   #position-bar .unit { font: 12px Menlo, monospace; color: var(--muted); }
   #position-bar.down .axis { color: var(--faint); }
   #readout { flex: 1; min-width: 200px; text-align: right; }
-  #stations { width: 100%; border-collapse: collapse; }
-  #stations th { text-align: left; font-size: 10px; color: var(--muted); padding: 3px 3px 1px; }
+  #stations { width: 100%; border-collapse: collapse; table-layout: fixed; }
+  #stations th { text-align: left; font-size: 10px; color: var(--muted); padding: 3px 3px 1px; font-weight: normal; letter-spacing: 0.05em; }
   #stations td { padding: 2px 3px; }
-  #stations td.name { font: bold 12px Menlo, monospace; color: var(--text); white-space: nowrap; }
-  #stations input.num { width: 56px; }
-  .remove { color: var(--bad); cursor: pointer; border: 0; background: none; padding: 0 4px; font-size: 14px; }
+  #stations tr + tr td { border-top: 1px solid var(--grid); }
+  #stations col.name { width: 28%; }
+  #stations col.node { width: 37%; }
+  #stations col.coord { width: 14%; }
+  #stations col.actions { width: 22px; }
+  #stations td.name { font: bold 12px Menlo, monospace; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #stations td.actions { text-align: right; }
+  #stations input { width: 100%; font-size: 11px; padding: 3px 4px; }
+  #stations input.sname { font-weight: bold; color: var(--ink); }
+  #stations .fixed { color: var(--faint); font: 11px Menlo, monospace; }
+  #station-message { min-height: 15px; margin: 4px 0 0; }
+  .remove { color: var(--faint); cursor: pointer; border: 0; background: none; padding: 0 2px; font-size: 13px; }
+  .remove:hover { color: var(--bad); background: none; }
+  .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
   /* ------------------------------------------------------------ shelf */
   #shelf-panel { background: var(--card); border: 1px solid var(--line); margin-top: 14px; padding: 12px 14px 14px; }
   #shelf-panel .head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
@@ -180,10 +203,12 @@
   .inst b { width: 52px; color: var(--ink); }
   .inst .what { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex: none; align-self: center; }
+
   #plan-upcoming { max-height: 168px; overflow-y: auto; counter-reset: up; }
   #plan-upcoming li { counter-increment: up; display: grid; grid-template-columns: 18px 1fr; gap: 0 4px; font: 11px Menlo, monospace; padding: 3px 0; border-top: 1px solid var(--grid); }
   #plan-upcoming li:first-child { border-top: 0; }
   #plan-upcoming li::before { content: counter(up); color: var(--faint); text-align: right; }
+  #plan-upcoming li.muted-line::before { content: ""; }
   #plan-upcoming .move { color: var(--ink); }
   #plan-upcoming .why { grid-column: 2; color: var(--muted); font-size: 10px; }
   #plan-upcoming li.next .move::after { content: "NEXT"; margin-left: 6px; font-size: 9px; font-weight: bold; color: #fff; background: var(--ok); padding: 0 4px; border-radius: 3px; }
@@ -220,7 +245,10 @@
   <span><a class="live" id="docs-link" href="/scheduler/docs" target="_blank" rel="noopener" style="margin-right:18px;color:var(--paper)">API docs</a><span class="live" id="live">connecting…</span></span>
 </header>
 <main>
-  <div id="bed-wrap"><svg id="bed" xmlns="http://www.w3.org/2000/svg"></svg></div>
+  <div id="bed-wrap">
+    <svg id="bed" xmlns="http://www.w3.org/2000/svg"></svg>
+    <div id="node-controls"></div>
+  </div>
   <div id="position-bar">
     <div class="axis"><span>X</span><b id="pos-x">--</b></div>
     <div class="axis"><span>Y</span><b id="pos-y">--</b></div>
@@ -228,6 +256,7 @@
     <div class="unit">mm</div>
     <div id="readout" class="mono small"></div>
   </div>
+  <div id="node-message" class="mono small"></div>
 
   <section id="shelf-panel">
     <div class="head">
@@ -266,8 +295,8 @@
     <section>
       <div class="row">
         <h2 class="grow" style="margin:0">PRESETS</h2>
-        <button id="reload-presets" title="Discard unsaved changes and re-read the file">Reload</button>
-        <button id="save-presets" class="primary">Save presets</button>
+        <button id="reload-presets" title="Re-read the file, dropping anything edited elsewhere">Reload</button>
+        <button id="save-presets" class="primary" title="Edits save by themselves; this writes the file now">Save now</button>
       </div>
       <div id="presets-status" class="mono small"></div>
       <div id="error" class="bad small"></div>
@@ -315,15 +344,20 @@
 
     <section>
       <h2>EXPERIMENTS</h2>
-      <p class="hint">Drag boxes on the bed to place them. Node is http://host:port, host:port or just port.</p>
+      <p class="hint">Type over a name to rename it everywhere at once, with nothing to restart.
+        Node is http://host:port, host:port or just port. Drag the boxes on the bed to place them.</p>
       <table id="stations">
-        <thead><tr><th>NAME</th><th>NODE</th><th>X</th><th>Y</th><th></th></tr></thead>
+        <colgroup><col class="name"><col class="node"><col class="coord"><col class="coord"><col class="actions"></colgroup>
+        <thead><tr><th>NAME</th><th>NODE</th><th>X</th><th>Y</th><th><span class="sr-only">Remove</span></th></tr></thead>
         <tbody></tbody>
       </table>
+      <div id="station-message" class="mono small"></div>
       <form class="row" id="add-form">
-        <input type="text" id="new-name" class="grow" spellcheck="false">
-        <button type="submit">Add experiment</button>
+        <input type="text" id="new-name" class="grow" spellcheck="false" aria-label="New experiment name">
+        <button type="submit">Add</button>
       </form>
+      <p class="hint">An experiment added, removed or re-addressed here reaches the running scheduler straight
+        away. One with a sample in it, or still in a substrate's route, keeps running until it is free.</p>
     </section>
 
     <section id="scheduler-card">
@@ -349,7 +383,8 @@ const POLL_MS = 150;
 const BED_MARGIN = 44;
 const MONO = 'font-family="Menlo, monospace"';
 const HALF_W = 56;
-const HALF_H = 30;
+// Tall enough for the three lines of text plus the start/stop/reset row.
+const HALF_H = 38;
 const NOT_STARTED = "not started";
 const UNREADABLE = "unreadable";
 const COLORS = {
@@ -400,17 +435,42 @@ function setError(text) { $("error").textContent = text; }
 
 let presetsFile = "data/presets.json";
 let unsaved = false;
+// The server's settings version this page last saw. Another tab (or a rename)
+// bumps it, and poll() then re-reads the settings so tabs cannot overwrite
+// each other with a stale copy.
+let presetsRevision = -1;
 
 function showPresetsStatus() {
   const status = $("presets-status");
-  status.textContent = unsaved ? `Unsaved changes (not in ${presetsFile} yet)` : `Saved in ${presetsFile}`;
+  status.textContent = unsaved ? `Saving to ${presetsFile}…` : `Saved in ${presetsFile}`;
   status.className = `mono small ${unsaved ? "warn" : "good"}`;
 }
 
 function takeReply(reply) {
   presetsFile = reply.file;
   unsaved = reply.unsaved;
+  if (typeof reply.revision === "number") presetsRevision = reply.revision;
   showPresetsStatus();
+}
+
+let lastStationReport = null;   // the last one the page has already shown
+
+// What the last settings change did to the running scheduler's experiments.
+function showStationReport(report) {
+  if (!report) return;
+  if (report.kept && report.kept.length) {
+    return setStationMessage(`Still running: ${prettyNames(report.kept.join("; "))}`, "warn");
+  }
+  const parts = [];
+  if (report.added && report.added.length) parts.push(`added ${report.added.map(stationLabel).join(", ")}`);
+  if (report.removed && report.removed.length) parts.push(`dropped ${report.removed.map(stationLabel).join(", ")}`);
+  if (parts.length) setStationMessage(`Scheduler ${parts.join(" and ")}.`, "good");
+}
+
+// True while the settings are being edited here, so a refresh would be rude.
+function editingSettings() {
+  const element = document.activeElement;
+  return Boolean(drag || saveTimer || (element && element.tagName === "INPUT" && element.closest("#settings")));
 }
 
 async function loadPresets() {
@@ -421,8 +481,8 @@ async function loadPresets() {
   fillForm();
 }
 
-// Edits go to the server right away (so every tab agrees) but only reach the
-// file when Save presets is pressed.
+// Edits go to the server right away (so every tab agrees) and are written to
+// presets.json a moment later, so nothing has to be saved by hand.
 function pushPresets() {
   unsaved = true;
   showPresetsStatus();
@@ -439,10 +499,24 @@ function pushPresets() {
       if (!response.ok) return setError(`Not applied: ${reply.detail}`);
       setError("");
       takeReply(reply);
+      showStationReport(reply.stations);
+      await savePresets();
     } catch {
       setError("Not applied: the GUI server is not running");
     }
   }, 250);
+}
+
+// Write what the server now holds to presets.json.
+async function savePresets() {
+  try {
+    const response = await fetch("/api/presets/save", { method: "POST" });
+    const reply = await response.json();
+    if (!response.ok) return setError(`Not saved: ${reply.detail}`);
+    takeReply(reply);
+  } catch {
+    setError("Not saved: the GUI server is not running");
+  }
 }
 
 async function presetsAction(path, button) {
@@ -497,12 +571,13 @@ function renderStationRows() {
     row.dataset.name = s.name;
     const shelf = s.name === "shelf";
     row.innerHTML = `
-      <td class="name">${esc(stationLabel(s.name))}</td>
-      <td>${shelf ? '<span class="mono" style="color:var(--faint)">--</span>'
-                  : `<input type="text" class="addr" data-key="address" value="${esc(s.address)}" spellcheck="false">`}</td>
-      <td><input type="text" class="num" data-key="x" value="${fmt(s.x)}"></td>
-      <td><input type="text" class="num" data-key="y" value="${fmt(s.y)}"></td>
-      <td>${shelf ? "" : '<button class="remove" title="Remove">✕</button>'}</td>`;
+      <td class="name">${shelf ? esc(stationLabel(s.name))
+                  : `<input type="text" class="sname" data-key="name" value="${esc(s.name)}" spellcheck="false" aria-label="Experiment name">`}</td>
+      <td>${shelf ? '<span class="fixed">no node</span>'
+                  : `<input type="text" class="addr" data-key="address" value="${esc(s.address)}" spellcheck="false" aria-label="Node address" placeholder="host:port">`}</td>
+      <td><input type="text" class="num" data-key="x" value="${fmt(s.x)}" aria-label="X"></td>
+      <td><input type="text" class="num" data-key="y" value="${fmt(s.y)}" aria-label="Y"></td>
+      <td class="actions">${shelf ? "" : `<button class="remove" title="Remove ${esc(stationLabel(s.name))}" aria-label="Remove ${esc(s.name)}">✕</button>`}</td>`;
     body.appendChild(row);
   }
 }
@@ -534,6 +609,16 @@ async function poll() {
     renderShelf("shelf" in snap ? snap.shelf
       : { problem: "This GUI server is older than the page and sends no shelf: restart python main.py" });
     if (snap.unsaved !== unsaved && !saveTimer) { unsaved = snap.unsaved; showPresetsStatus(); }
+    // A removal the scheduler could not take yet goes through later; say so when it does.
+    const stations = JSON.stringify(snap.stations || null);
+    if (stations !== lastStationReport) {
+      if (lastStationReport !== null) showStationReport(snap.stations);
+      lastStationReport = stations;
+    }
+    // Someone else changed the settings: take theirs rather than overwrite them.
+    if (typeof snap.presets_revision === "number" && snap.presets_revision !== presetsRevision && !editingSettings()) {
+      await loadPresets();
+    }
     lastPollOk = true;
   } catch {
     lastPollOk = false;
@@ -688,8 +773,60 @@ function draw() {
   svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
   svg.innerHTML = parts.join("");
   Object.assign(view, { upper, bottom, width });
+  drawNodeControls();
   drawGantryLayer();
 }
+
+// Start, stop and reset for one experiment node, under its box on the bed.
+// Only the buttons its current state allows are enabled.
+const NODE_BUTTONS = [
+  { action: "start", glyph: "▶", kind: "go", states: ["idle"],
+    hint: "Start a run on this node by hand (POST /start)" },
+  { action: "stop", glyph: "■", kind: "halt", states: ["busy"],
+    hint: "Stop the run on this node (POST /stop)" },
+  { action: "reset", glyph: "⟲", kind: "go", states: ["done", "stopped", "error"],
+    hint: "Reset this node with POST /taken: out of done, stopped or error and back to idle" },
+];
+
+let nodeControlsKey = "";
+
+// Only an experiment with a node address can be driven.
+function hasControls(s) { return s.name !== "shelf" && Boolean(s.address); }
+
+function drawNodeControls(force = false) {
+  const placed = presets.stations.filter(hasControls)
+    .map((s) => [s.name, toCanvas(s.x, s.y), (statuses[s.name] || {}).state || NOT_STARTED]);
+  const key = JSON.stringify(placed);
+  if (key === nodeControlsKey && !force) return;
+  nodeControlsKey = key;
+  $("node-controls").innerHTML = placed.map(([name, [x, y], state]) => {
+    const buttons = NODE_BUTTONS.map((b) =>
+      `<button data-node-action="${b.action}" data-node="${esc(name)}" class="${b.kind}" ` +
+      `title="${esc(stationLabel(name))}: ${esc(b.hint)}" aria-label="${b.action} ${esc(name)}"` +
+      `${b.states.includes(state) ? "" : " disabled"}>${b.glyph}</button>`).join("");
+    return `<div class="node-actions" style="left:${x}px;top:${y + HALF_H - 22}px">${buttons}</div>`;
+  }).join("");
+}
+
+function setNodeMessage(textContent, kind = "") {
+  const el = $("node-message");
+  el.textContent = textContent;
+  el.className = `mono small ${kind}`;
+}
+
+$("node-controls").addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-node-action]");
+  if (!button) return;
+  const { nodeAction, node } = button.dataset;
+  if (nodeAction === "stop" && !confirm(`Stop the run on ${stationLabel(node)}?`)) return;
+  for (const other of $("node-controls").querySelectorAll("button")) other.disabled = true;
+  setNodeMessage(`${stationLabel(node)}: ${nodeAction}…`);
+  const reply = await shelfAction("POST", `/api/experiments/${nodeAction}`, { name: node });
+  const done = { start: "started", stop: "stopping", reset: "reset to idle" }[nodeAction];
+  const state = reply.ok && reply.result ? ` · ${String(reply.result.state).toUpperCase()}` : "";
+  setNodeMessage(reply.ok ? `${stationLabel(node)} ${done}${state}` : prettyNames(reply.message), reply.ok ? "good" : "bad");
+  drawNodeControls(true);
+});
 
 function drawStation(s) {
   const [x, y] = toCanvas(s.x, s.y);
@@ -713,11 +850,13 @@ function drawStation(s) {
   }
   const strokeWidth = drag && drag.name === s.name ? 3 : 2;
   const port = s.address ? `:${addressPort(s.address)}` : "";
+  // With controls the text sits higher, leaving the bottom of the box for them.
+  const top = hasControls(s) ? -22 : -15;
   return [
     `<rect x="${x - HALF_W}" y="${y - HALF_H}" width="${2 * HALF_W}" height="${2 * HALF_H}" rx="2" fill="var(--card)" stroke="${color}" stroke-width="${strokeWidth}"/>`,
-    text(x, y - 13, stationLabel(s.name), 'text-anchor="middle" font-size="11" font-weight="bold" fill="var(--ink)"'),
-    text(x, y + 2, `${state} ${detail}`.trim(), `text-anchor="middle" font-size="10" font-weight="bold" fill="${color}" ${MONO}`),
-    text(x, y + 17, `(${fmt(s.x)}, ${fmt(s.y)}) ${port}`.trim(), `text-anchor="middle" font-size="9" fill="var(--muted)" ${MONO}`),
+    text(x, y + top, stationLabel(s.name), 'text-anchor="middle" font-size="11" font-weight="bold" fill="var(--ink)"'),
+    text(x, y + top + 15, `${state} ${detail}`.trim(), `text-anchor="middle" font-size="10" font-weight="bold" fill="${color}" ${MONO}`),
+    text(x, y + top + 30, `(${fmt(s.x)}, ${fmt(s.y)}) ${port}`.trim(), `text-anchor="middle" font-size="9" fill="var(--muted)" ${MONO}`),
   ].join("");
 }
 
@@ -852,10 +991,55 @@ $("shelf-slots").addEventListener("input", (event) => {
   }
 });
 
+function setStationMessage(textContent, kind = "") {
+  const el = $("station-message");
+  el.textContent = textContent;
+  el.className = `mono small ${kind}`;
+}
+
+// A name is only taken once the field is left (on "change"), so half-typed
+// names never reach the presets. The rename goes through the server, which
+// renames it in the running scheduler too: nothing has to be restarted.
+$("stations").addEventListener("change", async (event) => {
+  if (event.target.dataset.key !== "name") return;
+  const input = event.target;
+  const s = station(input.closest("tr").dataset.name);
+  if (!s) return;
+  const old = s.name;
+  const name = input.value.trim();
+  const refuse = (why) => { input.value = old; setStationMessage(why, "bad"); };
+  if (name === old) return;
+  if (!name) return refuse("An experiment needs a name.");
+  if (name.includes(",")) return refuse("Names cannot contain a comma: routes are comma-separated.");
+  if (name === "home") return refuse('"home" is the gantry\'s own spot, not an experiment.');
+  if (station(name)) return refuse(`${name} already exists.`);
+  input.disabled = true;
+  setStationMessage(`Renaming ${old} to ${name}…`);
+  try {
+    const response = await fetch("/api/experiments/rename", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: old, new_name: name }),
+    });
+    const reply = await response.json();
+    if (!response.ok) return refuse(prettyNames(reply.detail || "Not renamed"));
+    presets = reply.presets;
+    takeReply(reply);
+    draftRoute = draftRoute.map((step) => (step === old ? name : step));
+    setStationMessage(reply.note || `Renamed ${old} to ${name}.`, reply.note ? "warn" : "good");
+  } catch {
+    return refuse("Not renamed: the GUI server is not running");
+  } finally {
+    input.disabled = false;
+    fillForm();
+    draw();
+  }
+});
+
 $("stations").addEventListener("input", (event) => {
   const key = event.target.dataset.key;
   const s = station(event.target.closest("tr").dataset.name);
-  if (!key || !s) return;
+  if (!key || key === "name" || !s) return;
   if (key === "address") {
     s.address = event.target.value.trim();
   } else {
