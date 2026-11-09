@@ -1,0 +1,26 @@
+README.md
+  s_a272bde8ae3e21::t_ca9e2028cc3b62 387-393
+  s_a272bde8ae3e21::t_1ee64e6d904b6d 394
+web/static/index.html
+  s_a272bde8ae3e21::t_96cd7579438aac 66-71,813-814,842-843,847-853,858,985-986
+  s_a272bde8ae3e21::t_7dfc322018534e 242-260,319-332
+  s_a272bde8ae3e21::t_39657e0cb6afaf 449,815,862-966,973-974,976-978,980,982-984,987-988,1067-1069,1082,1086-1091
+  s_a272bde8ae3e21::t_481766c09a8b87 653,1451,1466
+  s_a272bde8ae3e21::t_84c3bd0441a178 333-334
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "928d6d7632f72933b7a477a73d14d31acb92c650",
+  "prompts": {},
+  "sessions": {
+    "s_a272bde8ae3e21": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a3ef2f89-71c2-4db8-9ff7-3b66fd5f87ec",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Henry Bonomolo <hbono@berkeley.edu>"
+    }
+  }
+}
