@@ -384,7 +384,14 @@ data is at `GET /scheduler/plan`.
 Each experiment box on the bed carries ▶ start, ■ stop and ⟲ reset for driving
 that node by hand; only the ones its current state allows are enabled, and the
 result appears under the bed. ⟲ reset sends `POST /taken`, which is how you get
-a node out of an `error` or `stopped` state without restarting anything. *API docs* in the header opens the scheduler's `/docs`. Settings
+a node out of an `error` or `stopped` state without restarting anything.
+
+**The ⤢ in a box's top-right corner, or a double-click on the box**, opens the
+whole breakdown of what that experiment is doing:
+the sample in it, when it started, elapsed and remaining against its own
+estimate, its error in full when it has one, its result and params, and what the
+scheduler thinks it holds (slot, route and whether it is waiting for pickup). It
+stays live while it is open, and carries the same start, stop and reset buttons. *API docs* in the header opens the scheduler's `/docs`. Settings
 are in cards below, and durations come from each node.
 
 - **Gantry**: the gantry node's address (empty to only simulate the gantry),

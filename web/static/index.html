@@ -63,6 +63,12 @@
   }
   #node-controls button.go:hover:not(:disabled) { color: var(--ok); border-color: var(--ok); }
   #node-controls button.halt:hover:not(:disabled) { color: var(--bad); border-color: var(--bad); }
+  /* The corner handle that opens everything the experiment is doing. */
+  #node-controls button.node-expand {
+    position: absolute; border: 0; background: none; color: var(--muted);
+    font: 12px/1 Menlo, monospace; padding: 2px 3px; border-radius: 3px;
+  }
+  #node-controls button.node-expand:hover { color: var(--ink); background: var(--grid); }
   #node-message { min-height: 15px; padding: 5px 14px 0; }
   /* Shapes are redrawn every poll; hit-testing is done in script against the svg itself. */
   #bed * { pointer-events: none; }
@@ -233,6 +239,25 @@
   dialog .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; align-items: center; }
   dialog .actions .grow { flex: 1; }
 
+  /* ------------------------------------------- experiment detail dialog */
+  #node-dialog { width: min(520px, calc(100vw - 32px)); }
+  #node-dialog .head { display: flex; align-items: center; gap: 8px; margin-bottom: 2px; }
+  #node-dialog h3 { margin: 0; flex: 1; }
+  #node-url { color: var(--faint); }
+  #node-body dl { display: grid; grid-template-columns: 94px 1fr; gap: 2px 10px; margin: 10px 0 0; }
+  #node-body dt { font: 10px Menlo, monospace; letter-spacing: 0.05em; color: var(--muted); padding-top: 2px; }
+  #node-body dd { margin: 0; font: 12px Menlo, monospace; color: var(--ink); overflow-wrap: anywhere; }
+  #node-body dd.quiet { color: var(--faint); }
+  #node-body h4 { margin: 14px 0 0; font-size: 10px; letter-spacing: 0.06em; color: var(--muted); font-weight: bold; }
+  #node-body .bar { height: 5px; background: var(--grid); border-radius: 3px; overflow: hidden; margin-top: 4px; }
+  #node-body .bar span { display: block; height: 100%; background: var(--busy); }
+  #node-body .fault { margin-top: 10px; padding: 7px 9px; border-radius: 4px; border-left: 3px solid var(--bad);
+    background: #fbefef; color: var(--bad); font: 12px Menlo, monospace; overflow-wrap: anywhere; }
+  #node-body pre { margin: 2px 0 0; padding: 6px 8px; border-radius: 4px; background: var(--bed);
+    border: 1px solid var(--line); font: 11px Menlo, monospace; color: var(--text);
+    max-height: 132px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+  #node-dialog .actions button.wide { font: 11px Menlo, monospace; }
+
   @media (max-width: 760px) {
     main { padding: 12px 16px; }
     #slots { grid-template-columns: repeat(auto-fill, minmax(100px, 1fr)); }
@@ -289,6 +314,22 @@
         <button type="submit" id="add-submit" class="primary">Add</button>
       </div>
     </form>
+  </dialog>
+
+  <dialog id="node-dialog">
+    <div class="head">
+      <h3 id="node-title">--</h3>
+      <span id="node-badge" class="badge">--</span>
+    </div>
+    <div id="node-url" class="mono small"></div>
+    <div id="node-body"></div>
+    <div class="actions">
+      <span id="node-dialog-message" class="small grow"></span>
+      <button type="button" class="wide go" data-dialog-action="start">▶ Start</button>
+      <button type="button" class="wide halt" data-dialog-action="stop">■ Stop</button>
+      <button type="button" class="wide go" data-dialog-action="reset">⟲ Reset</button>
+      <button type="button" id="node-close">Close</button>
+    </div>
   </dialog>
 
   <div id="settings">
@@ -405,6 +446,7 @@ let streamLive = false;     // main.py's position stream is connected
 let gantryFrame = 0;        // pending animation frame for the gantry layer
 let drag = null;            // {name, dx, dy}
 let hover = null;           // [x, y] in mm
+let hoverStation = null;    // the station under the cursor, if any
 let view = { scale: 1, ox: 0, oy: 0, upper: 0, bottom: 0, width: 0 };
 let saveTimer = null;
 let lastPollOk = false;
@@ -608,6 +650,7 @@ async function poll() {
     renderPlan(snap.plan);
     renderShelf("shelf" in snap ? snap.shelf
       : { problem: "This GUI server is older than the page and sends no shelf: restart python main.py" });
+    renderNodeDialog();
     if (snap.unsaved !== unsaved && !saveTimer) { unsaved = snap.unsaved; showPresetsStatus(); }
     // A removal the scheduler could not take yet goes through later; say so when it does.
     const stations = JSON.stringify(snap.stations || null);
@@ -767,7 +810,9 @@ function draw() {
   parts.push('<g id="gantry-layer"></g>');
 
   if (hover) {
-    parts.push(text(20, height - 10, `CURSOR  X ${hover[0].toFixed(1)}  Y ${hover[1].toFixed(1)} mm`,
+    const under = hoverStation && hoverStation !== "shelf"
+      ? `DOUBLE-CLICK ${stationLabel(hoverStation)} (OR ITS ⤢) FOR DETAILS` : null;
+    parts.push(text(20, height - 10, under || `CURSOR  X ${hover[0].toFixed(1)}  Y ${hover[1].toFixed(1)} mm`,
       `font-size="10" fill="var(--muted)" ${MONO}`));
   }
   svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
@@ -794,19 +839,130 @@ let nodeControlsKey = "";
 function hasControls(s) { return s.name !== "shelf" && Boolean(s.address); }
 
 function drawNodeControls(force = false) {
-  const placed = presets.stations.filter(hasControls)
-    .map((s) => [s.name, toCanvas(s.x, s.y), (statuses[s.name] || {}).state || NOT_STARTED]);
+  const placed = presets.stations.filter((s) => s.name !== "shelf")
+    .map((s) => [s.name, toCanvas(s.x, s.y), (statuses[s.name] || {}).state || NOT_STARTED, hasControls(s)]);
   const key = JSON.stringify(placed);
   if (key === nodeControlsKey && !force) return;
   nodeControlsKey = key;
-  $("node-controls").innerHTML = placed.map(([name, [x, y], state]) => {
+  $("node-controls").innerHTML = placed.map(([name, [x, y], state, driveable]) => {
+    // Top-right corner of the box: open everything this experiment is doing.
+    const expand = `<button class="node-expand" data-expand="${esc(name)}" ` +
+      `style="left:${x + HALF_W - 19}px;top:${y - HALF_H + 3}px" ` +
+      `title="${esc(stationLabel(name))}: show everything it is doing" ` +
+      `aria-label="Show what ${esc(name)} is doing">⤢</button>`;
+    if (!driveable) return expand;
     const buttons = NODE_BUTTONS.map((b) =>
       `<button data-node-action="${b.action}" data-node="${esc(name)}" class="${b.kind}" ` +
       `title="${esc(stationLabel(name))}: ${esc(b.hint)}" aria-label="${b.action} ${esc(name)}"` +
       `${b.states.includes(state) ? "" : " disabled"}>${b.glyph}</button>`).join("");
-    return `<div class="node-actions" style="left:${x}px;top:${y + HALF_H - 22}px">${buttons}</div>`;
+    return `${expand}<div class="node-actions" style="left:${x}px;top:${y + HALF_H - 22}px">${buttons}</div>`;
   }).join("");
 }
+
+// ------------------------------------------- experiment detail dialog
+
+// The experiment the dialog is showing, so each poll can keep it current.
+let openNode = null;
+
+function openNodeDialog(name) {
+  openNode = name;
+  setDialogMessage("");
+  renderNodeDialog();
+  const dialog = $("node-dialog");
+  if (!dialog.open) dialog.showModal();
+}
+
+function setDialogMessage(textContent, kind = "") {
+  const el = $("node-dialog-message");
+  el.textContent = textContent;
+  el.className = `small grow ${kind}`;
+}
+
+function clockTime(seconds) {
+  if (typeof seconds !== "number") return null;
+  const when = new Date(seconds * 1000);
+  return when.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+function duration(seconds) {
+  if (typeof seconds !== "number" || !Number.isFinite(seconds)) return null;
+  if (seconds < 60) return `${seconds.toFixed(1)}s`;
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes}m ${(seconds - 60 * minutes).toFixed(0)}s`;
+}
+function row(label, value, quiet = false) {
+  return value === null || value === undefined || value === ""
+    ? "" : `<dt>${esc(label)}</dt><dd class="${quiet ? "quiet" : ""}">${value}</dd>`;
+}
+function block(label, value) {
+  const empty = value === null || value === undefined ||
+    (typeof value === "object" && !Object.keys(value).length);
+  return empty ? "" : `<h4>${esc(label)}</h4><pre>${esc(JSON.stringify(value, null, 2))}</pre>`;
+}
+
+function renderNodeDialog() {
+  if (!openNode) return;
+  const name = openNode;
+  const spot = station(name);
+  const status = statuses[name] || { state: NOT_STARTED, error: "the GUI server has no reading for it" };
+  const state = status.state || NOT_STARTED;
+  const color = COLORS[state] || "var(--faint)";
+  const plan = planNow && planNow.instruments ? planNow.instruments.find((i) => i.name === name) : null;
+  const substrate = shelf && shelf.shelf
+    ? shelf.shelf.map((s) => s.substrate).find((sub) => sub && sub.location === name) : null;
+
+  $("node-title").textContent = stationLabel(name);
+  const badge = $("node-badge");
+  badge.textContent = problemLabel(state);
+  badge.style.background = color;
+  $("node-url").textContent = spot && spot.address ? `node ${spot.address}` : "no node address";
+
+  const elapsed = duration(status.elapsed);
+  const remaining = duration(status.remaining);
+  const estimated = duration(status.estimated_duration);
+  const percent = typeof status.elapsed === "number" && status.estimated_duration
+    ? Math.min(100, Math.round(100 * status.elapsed / status.estimated_duration)) : null;
+
+  const parts = [`<dl>
+    ${row("SAMPLE", status.sample_id ? `<b>${esc(status.sample_id)}</b>` : "nothing in it", !status.sample_id)}
+    ${row("STARTED", clockTime(status.started_at))}
+    ${row("ELAPSED", elapsed)}
+    ${row("REMAINING", remaining === null ? null : `${remaining}${estimated ? ` of ${estimated}` : ""}`)}
+    ${row("ESTIMATE", remaining === null ? estimated : null)}
+    ${row("BUSY", status.busy === undefined ? null : `${status.busy ? "yes" : "no"} · occupied ${status.occupied ? "yes" : "no"}`, true)}
+  </dl>`];
+  if (percent !== null && state === "busy") parts.push(`<div class="bar"><span style="width:${percent}%"></span></div>`);
+  if (status.error) parts.push(`<div class="fault">${esc(prettyNames(String(status.error)))}</div>`);
+
+  const route = substrate
+    ? `${substrate.route.map(stationLabel).join(" → ")} <span class="quiet">(step ${substrate.step} of ${substrate.route.length})</span>`
+    : null;
+  parts.push(`<h4>SCHEDULER</h4><dl>
+    ${row("HOLDS", plan && plan.sample_id ? esc(plan.sample_id) : "nothing", !(plan && plan.sample_id))}
+    ${row("PICKUP", plan && plan.waiting_for_pickup ? "waiting for the gantry" : null)}
+    ${row("SLOT", substrate ? `slot ${substrate.slot}` : null)}
+    ${row("ROUTE", route)}
+    ${row("KNOWN", plan ? null : "not in the running scheduler", true)}
+    ${row("ON BED", spot ? `(${fmt(spot.x)}, ${fmt(spot.y)}) mm` : null, true)}
+    ${row("CAN STOP", status.supports ? (status.supports.stop ? "yes" : "no — it runs to the end") : null, true)}
+  </dl>`);
+  parts.push(block("RESULT", status.result));
+  parts.push(block("PARAMS", status.params));
+
+  $("node-body").innerHTML = parts.join("");
+  for (const button of $("node-dialog").querySelectorAll("[data-dialog-action]")) {
+    const allowed = NODE_BUTTONS.find((b) => b.action === button.dataset.dialogAction).states;
+    button.disabled = !allowed.includes(state);
+  }
+}
+
+$("node-dialog").addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-dialog-action]");
+  if (!button || !openNode) return;
+  await runNodeAction(openNode, button.dataset.dialogAction, setDialogMessage);
+  renderNodeDialog();
+});
+$("node-close").addEventListener("click", () => $("node-dialog").close());
+$("node-dialog").addEventListener("close", () => { openNode = null; });
 
 function setNodeMessage(textContent, kind = "") {
   const el = $("node-message");
@@ -814,18 +970,22 @@ function setNodeMessage(textContent, kind = "") {
   el.className = `mono small ${kind}`;
 }
 
-$("node-controls").addEventListener("click", async (event) => {
-  const button = event.target.closest("[data-node-action]");
-  if (!button) return;
-  const { nodeAction, node } = button.dataset;
-  if (nodeAction === "stop" && !confirm(`Stop the run on ${stationLabel(node)}?`)) return;
+async function runNodeAction(node, action, say) {
+  if (action === "stop" && !confirm(`Stop the run on ${stationLabel(node)}?`)) return;
   for (const other of $("node-controls").querySelectorAll("button")) other.disabled = true;
-  setNodeMessage(`${stationLabel(node)}: ${nodeAction}…`);
-  const reply = await shelfAction("POST", `/api/experiments/${nodeAction}`, { name: node });
-  const done = { start: "started", stop: "stopping", reset: "reset to idle" }[nodeAction];
+  say(`${stationLabel(node)}: ${action}…`);
+  const reply = await shelfAction("POST", `/api/experiments/${action}`, { name: node });
+  const done = { start: "started", stop: "stopping", reset: "reset to idle" }[action];
   const state = reply.ok && reply.result ? ` · ${String(reply.result.state).toUpperCase()}` : "";
-  setNodeMessage(reply.ok ? `${stationLabel(node)} ${done}${state}` : prettyNames(reply.message), reply.ok ? "good" : "bad");
+  say(reply.ok ? `${stationLabel(node)} ${done}${state}` : prettyNames(reply.message), reply.ok ? "good" : "bad");
   drawNodeControls(true);
+}
+
+$("node-controls").addEventListener("click", (event) => {
+  const expand = event.target.closest("[data-expand]");
+  if (expand) return openNodeDialog(expand.dataset.expand);
+  const button = event.target.closest("[data-node-action]");
+  if (button) runNodeAction(button.dataset.node, button.dataset.nodeAction, setNodeMessage);
 });
 
 function drawStation(s) {
@@ -904,7 +1064,9 @@ svg.addEventListener("pointermove", (event) => {
   if (!presets) return;
   const [cx, cy] = eventPoint(event);
   hover = toBed(cx, cy);
-  svg.style.cursor = drag || stationAt(cx, cy) ? "move" : "crosshair";
+  const under = stationAt(cx, cy);
+  hoverStation = under && under.name;
+  svg.style.cursor = drag || under ? "move" : "crosshair";
   if (drag) {
     const s = station(drag.name);
     const [bedW, bedH] = bedSize();
@@ -917,11 +1079,16 @@ svg.addEventListener("pointermove", (event) => {
 svg.addEventListener("pointerup", () => {
   if (drag) { drag = null; pushPresets(); draw(); }
 });
-svg.addEventListener("pointerleave", () => { if (!drag) { hover = null; draw(); } });
+svg.addEventListener("pointerleave", () => { if (!drag) { hover = null; hoverStation = null; draw(); } });
 svg.addEventListener("dblclick", (event) => {
   if (!presets) return;
   const [cx, cy] = eventPoint(event);
-  if (stationAt(cx, cy)) return;
+  const spot = stationAt(cx, cy);
+  if (spot) {
+    // Double-clicking an experiment opens what it is doing, in full.
+    if (spot.name !== "shelf") openNodeDialog(spot.name);
+    return;
+  }
   const [bx, by] = toBed(cx, cy);
   const [bedW, bedH] = bedSize();
   if (bx < 0 || bx > bedW || by < 0 || by > bedH) return;
@@ -1281,6 +1448,7 @@ $("stop-resume").addEventListener("click", async () => {
 // ----------------------------------------------------------- scheduler
 
 let planKey = "";
+let planNow = null;         // the last plan the page drew, for the detail dialog
 
 function place(name) { return name === "shelf" ? "SHELF" : stationLabel(name); }
 // "experiment_b is busy" -> "EXP B is busy", "shelf" -> "SHELF".
@@ -1295,6 +1463,7 @@ function ago(seconds) {
 }
 
 function renderPlan(plan) {
+  planNow = plan;
   const key = JSON.stringify([plan, plan ? plan.instruments.map((i) => statuses[i.name]) : null]);
   if (key === planKey) return;
   planKey = key;
